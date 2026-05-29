@@ -1,0 +1,23 @@
+{
+  "name": "smtn",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+  },
+  "dependencies": {
+    "@cloudflare/workers-types": "^4.20251209.0",
+    "@instantdb/admin": "^0.22.81",
+    "agents": "^0.2.31",
+    "ai": "^5.0.108",
+    "capnweb": "^0.2.0",
+    "hono": "^4.10.7",
+    "stripe": "^20.0.0",
+    "workers-ai-provider": "^2.0.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "wrangler": "^4.19.1"
+  }
+}
