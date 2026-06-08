@@ -6,10 +6,11 @@ import {
   init,
   id,
   InstantAdminDatabase,
-  InstantConfig
+  InstantConfig,
 } from "@instantdb/admin";
-import schema, { AppSchema, } from "../instant.schema";
+import schema, { AppSchema } from "../instant.schema";
 import Stripe from "stripe";
+import { Shippo, WeightUnitEnum, DistanceUnitEnum } from "shippo";
 import { calculateShipping } from "./shipping";
 
 export interface Env {
@@ -18,11 +19,12 @@ export interface Env {
   INSTANT_DB_APP_ID: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
+  SHIPPO_API_KEY: string;
   AI: Ai;
   [key: string]: any;
 }
 
-export interface OrderMetadata {
+export interface Order {
   packages: {
     quantity: number;
     weight: number;
@@ -30,60 +32,94 @@ export interface OrderMetadata {
     width: number;
     length: number;
   }[];
-  barrels: {
-    small: number;
-    large: number;
-  };
-  description: {
-    description: string;
-  };
-  devices: {
-    phones: number;
-    consoles: number;
-    laptops: number;
-    tablets: number;
-  };
-  trip: {
-    from: string;
-    to: string;
-    method: string;
-    type: string;
+  description: string;
+  phones: number;
+  consoles: number;
+  laptops: number;
+  tablets: number;
+  from: string;
+  to: string;
+  paid: boolean;
+}
+
+interface PlaceSuggestion {
+  description: string;
+  placeId: string;
+  structuredFormatting: {
+    mainText: string;
+    secondaryText: string;
+    mainTextMatchedSubstrings: { length: number; offset: number }[];
   };
 }
 
+interface Package {
+  weight: number;
+  length: number;
+  width: number;
+  height: number;
+}
+
+interface ShippingProduct {
+  id: string;
+  name: string;
+  provider: string;
+  amount: number;
+  currency: string;
+  estimatedDays?: number;
+  distanceText?: string;
+  durationText?: string;
+  providerImage75?: string;
+  providerImage200?: string;
+}
+
+function extractCountryCode(description: string): string {
+  const country = description.split(",").pop()?.trim() ?? "";
+  const codes: Record<string, string> = {
+    Canada: "CA",
+    Nigeria: "NG",
+    "United Kingdom": "GB",
+    "United States": "US",
+    France: "FR",
+    Germany: "DE",
+  };
+  return codes[country] ?? "CA";
+}
+
 interface API {
-  dara(message: string, chatId: string): Promise<string>;
-  submit(deviceId: string, value: OrderMetadata): Promise<string | null>;
-  getAvailableMethods(type: string, from: string, to: string): Promise<string[]>;
-  getPlaceSuggestions(input: string): Promise<string[]>;
-  removeTag(deviceId: string, orderId: string, tags: any): void;
+  submit(value: Order): Promise<string | null>;
+  getAvailableMethods(
+    type: string,
+    from: string,
+    to: string,
+  ): Promise<string[]>;
+  getPlaceSuggestions(input: string): Promise<PlaceSuggestion[]>;
+  getProducts(place: PlaceSuggestion, office: PlaceSuggestion, packages: Package[]): Promise<ShippingProduct[]>;
 }
 
 class RPC extends RpcTarget implements API {
   private stripe: Stripe;
-  private db: InstantAdminDatabase<AppSchema, false, InstantConfig<AppSchema, false>>;
+  private shippo: Shippo;
+  private db: InstantAdminDatabase<
+    AppSchema,
+    false,
+    InstantConfig<AppSchema, false>
+  >;
 
-  constructor(private env: Env, private ctx: ExecutionContext) {
+  constructor(
+    private env: Env,
+    private ctx: ExecutionContext,
+  ) {
     super();
     this.stripe = new Stripe(this.env.STRIPE_SECRET_KEY);
-    this.db = init({ appId: this.env.INSTANT_DB_APP_ID, adminToken: this.env.INSTANT_DB_ADMIN_TOKEN, schema: schema });
+    this.shippo = new Shippo({ apiKeyHeader: this.env.SHIPPO_API_KEY });
+    this.db = init({
+      appId: this.env.INSTANT_DB_APP_ID,
+      adminToken: this.env.INSTANT_DB_ADMIN_TOKEN,
+      schema: schema,
+    });
   }
 
-  async submit(deviceId: string, value: OrderMetadata) {
-
-    const { devices } = await this.db.query({
-      devices: {
-        $: {
-          where: {
-            "id": deviceId,
-          },
-        },
-        users: {},
-      },
-    });
-
-    const user = devices[0]?.users;
-
+  async submit(value: Order) {
     const session = await this.stripe.checkout.sessions.create({
       adaptive_pricing: {
         enabled: true,
@@ -95,8 +131,8 @@ class RPC extends RpcTarget implements API {
       line_items: [
         {
           price_data: {
-            currency: 'cad',
-            product: 'prod_TbmLGQbrCH7LTj',
+            currency: "cad",
+            product: "prod_TbmLGQbrCH7LTj",
             unit_amount: calculateShipping(value),
           },
           quantity: 1,
@@ -106,7 +142,7 @@ class RPC extends RpcTarget implements API {
         enabled: true,
       },
       phone_number_collection: {
-        "enabled": true
+        enabled: true,
       },
       mode: "payment",
       metadata: {
@@ -131,101 +167,99 @@ class RPC extends RpcTarget implements API {
     }
   }
 
-  async dara(message: string, chatId: string) {
-    const workersai = createWorkersAI({ binding: this.env.AI });
-
-    const model = workersai("@cf/meta/llama-3-8b-instruct", {});
-
-    const { chats } = await this.db.query({
-      chats: {
-        $: {
-          where: {
-            "id": chatId,
-          },
-        },
-      },
-    });
-
-    if (!chats[0]) {
-      await this.db.transact(this.db.tx.chats[chatId].create({ messages: JSON.stringify([]) }))
-    }
-
-    const messages = JSON.parse(chats[0].messages).concat([{ role: "user" as const, content: message }]) as Array<{ role: 'user' | 'assistant' | 'system', content: string }>
-
-    const tools = {
-      codemode: {
-        description: "Output your response in runnable typescript code only. Your response will then be run in a sandboxed runtime.",
-        inputSchema: z.object({ code: z.string() }),
-        execute: async ({ code }: { code: string }) => {
-          return await this.env.LOADER.eval(code);
-        },
-      },
-    };
-
-    const system = `
-      You are Dara. Smtn's assistant. Smtn is a freight forwarding company that operates mainly in the Nigerian Diaspora.
-      Our offices are located in Toronto, Lagos, Montreal, Abuja and London.
-    `
-
-    const result = await generateText({
-      model,
-      system,
-      messages,
-      tools,
-    });
-
-    console.log(result);
-    return "hi"
-  }
-
   async getPlaceSuggestions(input: string) {
-    console.log("Call getPlaceSuggestions", input);
-
-    if (!input || input.length < 2) {
-      return [];
-    }
+    if (!input || input.length < 2) return [];
 
     try {
-      const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(input)}&key=${this.env.GOOGLE_MAPS_API_KEY}`;
+      const response = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": this.env.GOOGLE_MAPS_API_KEY,
+        },
+        body: JSON.stringify({ input }),
+      });
+      const data = (await response.json()) as any;
 
-      const response = await fetch(url);
-      const data = await response.json() as any;
-
-      if (data.status === 'OK') {
-        return data.predictions.map((prediction: any) => ({
-          description: prediction.description,
-          placeId: prediction.place_id,
-        }));
-      }
-
-      return [];
+      return (data.suggestions ?? []).map((s: any) => {
+        const p = s.placePrediction;
+        return {
+          description: p.text.text,
+          placeId: p.placeId,
+          structuredFormatting: {
+            mainText: p.structuredFormat.mainText.text,
+            secondaryText: p.structuredFormat.secondaryText.text,
+            mainTextMatchedSubstrings: (p.structuredFormat.mainText.matches ?? []).map(
+              (m: any) => ({ offset: m.startOffset ?? 0, length: m.endOffset - (m.startOffset ?? 0) })
+            ),
+          },
+        };
+      });
     } catch (error) {
       console.error("Places API error:", error);
       return [];
     }
   }
 
-  async removeTag(deviceId: string, orderId: string, tags: any) {
-   await this.db.transact(this.db.tx.orders[orderId].update({ tags: tags }));
+  async getProducts(place: PlaceSuggestion, office: PlaceSuggestion, packages: Package[]): Promise<ShippingProduct[]> {
+    const shipments = await this.shippo.shipments.create({
+      addressFrom: {
+        name: "Smtn Office",
+        street1: office.structuredFormatting.mainText,
+        city: office.structuredFormatting.secondaryText.split(",")[0],
+        country: extractCountryCode(office.description),
+      },
+      addressTo: {
+        name: "Customer",
+        street1: place.structuredFormatting.mainText,
+        city: place.structuredFormatting.secondaryText.split(",")[0],
+        country: extractCountryCode(place.description),
+      },
+      parcels: packages.map((p) => ({
+        massUnit: WeightUnitEnum.Kg,
+        weight: String(p.weight),
+        distanceUnit: DistanceUnitEnum.In,
+        length: String(p.length),
+        width: String(p.width),
+        height: String(p.height),
+      })),
+      async: false,
+    });
+  
+    return (shipments.rates ?? []).map((rate) => ({
+      id: rate.objectId,
+      name: rate.servicelevel.name ?? rate.provider,
+      provider: rate.provider,
+      amount: Math.round(parseFloat(rate.amount) * 100),
+      currency: rate.currency,
+      estimatedDays: rate.estimatedDays ?? undefined,
+      providerImage75: rate.providerImage75 ?? undefined,
+      providerImage200: rate.providerImage200 ?? undefined,
+    }));
   }
+
 }
 
 // Webhook handler function
-async function handleStripeWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function handleStripeWebhook(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const stripe = new Stripe(env.STRIPE_SECRET_KEY);
   const db = init({
     appId: env.INSTANT_DB_APP_ID,
     adminToken: env.INSTANT_DB_ADMIN_TOKEN,
-    schema: schema
+    schema: schema,
   });
 
   try {
     // Get the raw body
     const body = await request.text();
-    const signature = request.headers.get('stripe-signature');
+    const signature = request.headers.get("stripe-signature");
 
     if (!signature) {
-      return new Response('No signature', { status: 400 });
+      return new Response("No signature", { status: 400 });
     }
 
     // Verify the webhook signature
@@ -234,30 +268,33 @@ async function handleStripeWebhook(request: Request, env: Env, ctx: ExecutionCon
       event = await stripe.webhooks.constructEventAsync(
         body,
         signature,
-        env.STRIPE_WEBHOOK_SECRET
+        env.STRIPE_WEBHOOK_SECRET,
       );
     } catch (err) {
-      console.error('Webhook signature verification failed:', err);
-      return new Response(`Webhook Error: ${err instanceof Error ? err.message : 'Unknown error'}`, { status: 400 });
+      console.error("Webhook signature verification failed:", err);
+      return new Response(
+        `Webhook Error: ${err instanceof Error ? err.message : "Unknown error"}`,
+        { status: 400 },
+      );
     }
 
     // Handle the event
     switch (event.type) {
-      case 'checkout.session.completed': {
+      case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
-        console.log('Payment successful:', session.id);
+        console.log("Payment successful:", session.id);
 
         // Get the device ID from client_reference_id
         const deviceId = session.client_reference_id;
 
-        console.log("Session", session)
+        console.log("Session", session);
 
         if (deviceId) {
           const { devices, users } = await db.query({
             devices: {
               $: {
                 where: {
-                  "id": deviceId,
+                  id: deviceId,
                 },
               },
               users: {},
@@ -265,69 +302,85 @@ async function handleStripeWebhook(request: Request, env: Env, ctx: ExecutionCon
             users: {
               $: {
                 where: {
-                  "email": session.customer_details?.email || "",
+                  email: session.customer_details?.email || "",
                 },
               },
             },
           });
 
-          const userId = users[0]?.id || id()
+          const userId = users[0]?.id || id();
 
           if (!users || !users[0]) {
-            await db.transact(db.tx.users[userId].create({ phone: session.customer_details?.phone || "", email: session.customer_details?.email }))
+            await db.transact(
+              db.tx.users[userId].create({
+                phone: session.customer_details?.phone || "",
+                email: session.customer_details?.email,
+              }),
+            );
           }
 
           //if (!devices || !devices[0]) {
-            //await db.transact(db.tx.devices[deviceId].create({})).link({ users: userId })
-         //}
+          //await db.transact(db.tx.devices[deviceId].create({})).link({ users: userId })
+          //}
 
-          const metadata = JSON.parse(session.metadata?.value || '{}') as OrderMetadata;
+          const metadata = JSON.parse(
+            session.metadata?.value || "{}",
+          ) as Order;
 
-          console.log(metadata)
+          console.log(metadata);
 
-          const orderId = id()
+          const orderId = id();
 
           const packages = metadata.packages.map((pkg, index) =>
-            db.tx.packages[id()].create({
-              quantity: pkg.quantity,
-              weight: pkg.weight,
-              height: pkg.height,
-              width: pkg.width,
-              length: pkg.length,
-            }).link({ orders: orderId })
-          )
+            db.tx.packages[id()]
+              .create({
+                quantity: pkg.quantity,
+                weight: pkg.weight,
+                height: pkg.height,
+                width: pkg.width,
+                length: pkg.length,
+              })
+              .link({ orders: orderId }),
+          );
 
           await db.transact([
             db.tx.devices[deviceId].link({ users: userId }),
-            db.tx.orders[orderId].update({ amountTotal: session.amount_subtotal, amountPaid: session.amount_total, from: metadata.trip.from, to: metadata.trip.to, createdAt: new Date() }).link({ users: userId }),
+            db.tx.orders[orderId]
+              .update({
+                amountTotal: session.amount_subtotal,
+                amountPaid: session.amount_total,
+                from: metadata.from,
+                to: metadata.to,
+                createdAt: new Date(),
+              })
+              .link({ users: userId }),
             ...packages,
-          ])
-
+          ]);
         }
         break;
       }
 
-      case 'checkout.session.expired': {
+      case "checkout.session.expired": {
         const session = event.data.object as Stripe.Checkout.Session;
-        console.log('Checkout session expired:', session.id);
+        console.log("Checkout session expired:", session.id);
         break;
       }
 
-      case 'payment_intent.succeeded': {
+      case "payment_intent.succeeded": {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        console.log('PaymentIntent succeeded:', paymentIntent.id);
+        console.log("PaymentIntent succeeded:", paymentIntent.id);
         break;
       }
 
-      case 'payment_intent.payment_failed': {
+      case "payment_intent.payment_failed": {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        console.log('Payment failed:', paymentIntent.id);
+        console.log("Payment failed:", paymentIntent.id);
         break;
       }
 
-      case 'invoice.payment_succeeded': {
+      case "invoice.payment_succeeded": {
         const invoice = event.data.object as Stripe.Invoice;
-        console.log('Invoice payment succeeded:', invoice.id);
+        console.log("Invoice payment succeeded:", invoice.id);
         break;
       }
 
@@ -337,24 +390,27 @@ async function handleStripeWebhook(request: Request, env: Env, ctx: ExecutionCon
 
     return new Response(JSON.stringify({ received: true }), {
       status: 200,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { "Content-Type": "application/json" },
     });
-
   } catch (error) {
-    console.error('Webhook error:', error);
+    console.error("Webhook error:", error);
     return new Response(
-      `Webhook Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      { status: 500 }
+      `Webhook Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+      { status: 500 },
     );
   }
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     // Handle webhook endpoint
-    if (url.pathname === '/webhook/stripe' && request.method === 'POST') {
+    if (url.pathname === "/webhook/stripe" && request.method === "POST") {
       return handleStripeWebhook(request, env, ctx);
     }
 
