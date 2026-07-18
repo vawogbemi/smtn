@@ -1,7 +1,10 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "smtn",
-	"main": "src/index.ts",
+	"main": "src/index.tsx",
+	"assets": {
+		"directory": "./dist/client"
+	},
 	"compatibility_date": "2025-11-27",
 	"compatibility_flags": [
 		"nodejs_compat",
@@ -25,11 +28,27 @@
 	"ai": {
 		"binding": "AI"
 	},
+	"worker_loaders": [
+		{
+			"binding": "LOADER"
+		}
+	],
 	"routes": [
 		{
 			"pattern": "api.smtncargo.com",
 			"zone_name": "smtncargo.com",
-			"custom_domain": true
+			"custom_domain": true,
+	
+		},
+		{
+			"pattern": "smtncargo.com",
+			"zone_name": "smtncargo.com",
+			"custom_domain": true,
+		},
+		{
+			"pattern": "www.smtncargo.com",
+			"zone_name": "smtncargo.com",
+			"custom_domain": true,
 		}
 	],
 	"workers_dev": true,

@@ -1,6 +1,6 @@
 // Docs: https://www.instantdb.com/docs/modeling-data
 
-import { i } from "@instantdb/core";
+import { i } from "@instantdb/react";
 
 const _schema = i.schema({
   entities: {
@@ -32,6 +32,10 @@ const _schema = i.schema({
       "fullName": i.any().optional(),
       "name": i.any().optional(),
     }),
+    "orderFrom": i.entity({
+      "description": i.any().optional(),
+      "placeId": i.any().optional(),
+    }),
     "orderItems": i.entity({
       "consoles": i.any().optional(),
       "laptops": i.any().optional(),
@@ -45,8 +49,10 @@ const _schema = i.schema({
       "amountTotal": i.any().optional(),
       "clearance": i.any().optional(),
       "createdAt": i.any().optional(),
-      "from": i.any().optional(),
-      "to": i.any().optional(),
+    }),
+    "orderTo": i.entity({
+      "description": i.any().optional(),
+      "placeId": i.any().optional(),
     }),
     "packages": i.entity({
       "height": i.any().optional(),
@@ -100,6 +106,19 @@ const _schema = i.schema({
         "onDelete": "cascade"
       }
     },
+    "orderFromOrders": {
+      "forward": {
+        "on": "orderFrom",
+        "has": "one",
+        "label": "orders",
+        "onDelete": "cascade"
+      },
+      "reverse": {
+        "on": "orders",
+        "has": "one",
+        "label": "orderFrom"
+      }
+    },
     "ordersOrderItems": {
       "forward": {
         "on": "orders",
@@ -124,6 +143,19 @@ const _schema = i.schema({
         "on": "shipments",
         "has": "many",
         "label": "orders"
+      }
+    },
+    "orderToOrders": {
+      "forward": {
+        "on": "orderTo",
+        "has": "one",
+        "label": "orders",
+        "onDelete": "cascade"
+      },
+      "reverse": {
+        "on": "orders",
+        "has": "one",
+        "label": "orderTo"
       }
     },
     "packagesOrders": {

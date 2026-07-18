@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+/*
+  Linear-inspired theme.
+  Semantic colors are plain CSS variables mapped into Tailwind via `@theme
+  inline` (utilities resolve to var(...) at runtime, so overriding a variable
+  re-colors every utility).
+
+  Light is the default; dark is applied via `data-theme="dark"` on <html>, set
+  by the boot script in index.tsx (which resolves "system" from the OS before
+  first paint) and toggled at runtime by ThemeProvider. The React Spectrum
+  provider is driven from the same state via its `colorScheme` prop.
+*/
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  /* Brand — cobalt blue */
+  --primary: #0057b8;
+  --secondary: #004a9e;
+  --accent: #1a7de8;
+  --spinner: #0057b8;
+
+  /* Surfaces */
+  --surface: #ffffff;
+  --surface-alt: #f6f7f8;
+  --border: #e7e8ea;
+  --border-muted: #f0f1f3;
+  --hover: #f1f2f4;
+
+  /* Text */
+  --text-primary: #1b1c1f;
+  --text-secondary: #45484e;
+  --text-muted: #767a82;
+}
+
+[data-theme="dark"] {
+  /* Brand — brightened cobalt for contrast on dark surfaces */
+  --primary: #4c8dff;
+  --secondary: #3d7cf0;
+  --accent: #5b9bff;
+  --spinner: #4c8dff;
+
+  /* Surfaces — near-black canvas, hairline borders */
+  --surface: #191a1d;
+  --surface-alt: #212328;
+  --border: #2a2c31;
+  --border-muted: #232529;
+  --hover: #25272c;
+
+  /* Text */
+  --text-primary: #ededef;
+  --text-secondary: #babcc1;
+  --text-muted: #888b92;
+}
+
+@theme inline {
+  --color-primary: var(--primary);
+  --color-secondary: var(--secondary);
+  --color-accent: var(--accent);
+  --color-spinner: var(--spinner);
+
+  --color-surface: var(--surface);
+  --color-surface-alt: var(--surface-alt);
+  --color-border: var(--border);
+  --color-border-muted: var(--border-muted);
+  --color-hover: var(--hover);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+}
