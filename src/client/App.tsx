@@ -10,8 +10,8 @@ import Track from "./routes/track";
 import { Shipments, Shipment } from "./routes/shipments";
 
 const FixedTheme = ({ children }: { children: ReactNode }) => (
-  <div data-theme="dark" className="w-full h-full">
-    <Provider theme={defaultTheme} colorScheme="dark" UNSAFE_className="w-full h-full">
+  <div data-theme="light" className="w-full h-full">
+    <Provider theme={defaultTheme} colorScheme="light" UNSAFE_className="w-full h-full">
       {children}
     </Provider>
   </div>

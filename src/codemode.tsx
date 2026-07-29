@@ -4,20 +4,51 @@ import schema from "../instant.schema";
 import { RPC, type Env, type Package, type PlaceSuggestion } from "./rpc";
 import { Lagos_Office, Toronto_Office } from "./offices";
 
+// Entities Dara may write to; keeps $users, $files, and messages off limits.
+const WRITABLE = [
+  "shipments",
+  "orders",
+  "packages",
+  "customers",
+  "orderFrom",
+  "orderTo",
+] as const;
+
+interface WriteOp {
+  entity: (typeof WRITABLE)[number];
+  id: string;
+  data?: Record<string, unknown>;
+  link?: Record<string, string>;
+}
+
 // The capability handed to the sandbox. Uses #private fields so env/ctx/secrets
 // are unreachable over RPC -- the sandbox can only call the public methods.
-// canSend gates sendMessage: SMS sessions run read-only so an injected text
-// can't make Dara message arbitrary numbers.
+// canSend/canWrite gate the side-effecting methods: SMS sessions run read-only
+// so an injected text can't message anyone or mutate the database.
 class DaraTools extends RpcTarget {
   #env: Env;
   #ctx: ExecutionContext;
   #canSend: boolean;
+  #canWrite: boolean;
 
-  constructor(env: Env, ctx: ExecutionContext, opts: { canSend?: boolean } = {}) {
+  constructor(
+    env: Env,
+    ctx: ExecutionContext,
+    opts: { canSend?: boolean; canWrite?: boolean } = {},
+  ) {
     super();
     this.#env = env;
     this.#ctx = ctx;
     this.#canSend = opts.canSend ?? false;
+    this.#canWrite = opts.canWrite ?? false;
+  }
+
+  #db() {
+    return init({
+      appId: this.#env.INSTANT_DB_APP_ID,
+      adminToken: this.#env.INSTANT_DB_ADMIN_TOKEN,
+      schema,
+    });
   }
 
   #rpc() {
@@ -48,12 +79,25 @@ class DaraTools extends RpcTarget {
   }
 
   query(q: Record<string, unknown>) {
-    const db = init({
-      appId: this.#env.INSTANT_DB_APP_ID,
-      adminToken: this.#env.INSTANT_DB_ADMIN_TOKEN,
-      schema,
-    });
-    return db.query(q as never);
+    return this.#db().query(q as never);
+  }
+
+  write(ops: WriteOp[]) {
+    if (!this.#canWrite) {
+      throw new Error("write is not available in this session");
+    }
+    const db = this.#db();
+    return db.transact(
+      ops.map((op) => {
+        if (!WRITABLE.includes(op.entity)) {
+          throw new Error(`Cannot write to "${op.entity}"`);
+        }
+        const chunk = (db.tx[op.entity] as Record<string, any>)[op.id].update(
+          op.data ?? {},
+        );
+        return op.link ? chunk.link(op.link) : chunk;
+      }),
+    );
   }
 }
 
@@ -65,6 +109,18 @@ api.getProducts(place: Place, office: Place, packages: { weight, length, width, 
 api.query(q) -> data -- read-only InstaQL query on SMTN's database.`;
 
 const SEND_METHOD = `api.sendMessage(messages: { to: string, body: string }[]) -> { sent, failed } -- SMS each recipient; "to" is an E.164 phone number.`;
+
+const WRITE_METHOD = `api.write(ops) -> transaction result -- create or update entities and their links (no deletes). Each op: { entity: "shipments"|"orders"|"packages"|"customers"|"orderFrom"|"orderTo", id: string, data?: object, link?: { label: id } }. Generate new ids with crypto.randomUUID(); writing to an existing id updates it.
+Example -- create an order with one package for a possibly-new customer in a shipment:
+  const phone = "+14165550123";
+  const existing = (await api.query({ customers: { $: { where: { phone } } } })).customers[0];
+  const customerId = existing?.id ?? crypto.randomUUID();
+  const orderId = crypto.randomUUID();
+  await api.write([
+    { entity: "customers", id: customerId, data: { name: "Ada", phone } },
+    { entity: "orders", id: orderId, data: { createdAt: Date.now() }, link: { customers: customerId, shipments: shipmentId } },
+    { entity: "packages", id: crypto.randomUUID(), data: { number: "1", weight: 10 }, link: { orders: orderId } },
+  ]);`;
 
 const SCHEMA_DOC = `InstaQL: { entity: { linkedEntity: {}, $: { where: { field: value } } } } selects entities plus their linked entities.
 Entities and links:
@@ -90,6 +146,7 @@ ${CODE_RULES}
 
 ${READ_METHODS}
 ${SEND_METHOD}
+${WRITE_METHOD}
 
 ${SCHEMA_DOC}`;
 
@@ -103,15 +160,30 @@ ${READ_METHODS}
 
 ${SCHEMA_DOC}`;
 
-// Entry module for the sandboxed isolate; the generated code is mounted as task.js.
+// Entry module for the sandboxed isolate; the generated code is mounted as
+// task.js. The api arrives as the run() argument because RPC targets can only
+// be serialized inside an RPC call, not in the worker's env. The result is
+// round-tripped through JSON *inside* the sandbox (same isolate, so it can
+// never throw the cross-isolate DataCloneError) before it's handed back --
+// generated code sometimes returns "api" itself or another live reference by
+// mistake, and that can't cross the RPC boundary as ordinary data.
 const HARNESS = `import { WorkerEntrypoint } from "cloudflare:workers";
 import run from "./task.js";
 export default class extends WorkerEntrypoint {
-  async run() {
+  async run(api) {
+    let result;
     try {
-      return { ok: true, result: (await run(this.env.DARA)) ?? null };
+      result = (await run(api)) ?? null;
     } catch (e) {
       return { ok: false, error: (e && e.stack) || String(e) };
+    }
+    try {
+      return { ok: true, result: JSON.parse(JSON.stringify(result)) };
+    } catch (e) {
+      return {
+        ok: false,
+        error: "Your returned result isn't plain, JSON-serializable data (e.g. it embeds api or another live reference): " + ((e && e.message) || String(e)),
+      };
     }
   }
 }`;
@@ -119,7 +191,7 @@ export default class extends WorkerEntrypoint {
 type Outcome = { ok: true; result: unknown } | { ok: false; error: string };
 
 interface Harness extends Rpc.WorkerEntrypointBranded {
-  run(): Promise<Outcome>;
+  run(api: DaraTools): Promise<Outcome>;
 }
 
 const MODEL = "@cf/qwen/qwen2.5-coder-32b-instruct";
@@ -127,28 +199,37 @@ const MODEL = "@cf/qwen/qwen2.5-coder-32b-instruct";
 const extractCode = (text: string) =>
   /```(?:\w+)?\s*([\s\S]*?)```/.exec(text)?.[1].trim() ?? text.trim();
 
-function runSandbox(
+type Caps = { canSend?: boolean; canWrite?: boolean };
+
+// Always resolves to an Outcome -- never rejects -- so callers can rely on
+// generate()'s retry loop instead of needing their own try/catch. Transport
+// -level failures (timeouts, CPU-limit kills, anything the harness's own
+// try/catch couldn't intercept) are converted the same way as script errors.
+async function runSandbox(
   env: Env,
   ctx: ExecutionContext,
   code: string,
-  canSend: boolean,
-) {
+  caps: Caps,
+): Promise<Outcome> {
   const worker = env.LOADER.get(`dara-${crypto.randomUUID()}`, () => ({
     compatibilityDate: "2025-11-27",
     mainModule: "main.js",
     modules: { "main.js": HARNESS, "task.js": code },
-    env: { DARA: new DaraTools(env, ctx, { canSend }) },
-    // No network: the DARA binding is the sandbox's only capability.
+    // No network: the api passed into run() is the sandbox's only capability.
     globalOutbound: null,
     limits: { cpuMs: 10_000, subRequests: 50 },
   }));
-  return worker.getEntrypoint<Harness>().run() as Promise<Outcome>;
+  try {
+    return await worker.getEntrypoint<Harness>().run(new DaraTools(env, ctx, caps));
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? (e.stack ?? e.message) : String(e) };
+  }
 }
 
 async function generate(
   env: Env,
   ctx: ExecutionContext,
-  canSend: boolean,
+  caps: Caps,
   messages: { role: string; content: string }[],
 ) {
   let code = "";
@@ -157,7 +238,7 @@ async function generate(
     const res = await env.AI.run(MODEL, { messages, max_tokens: 4096 });
     const reply = String((res as { response?: unknown }).response ?? "");
     code = extractCode(reply);
-    const outcome = await runSandbox(env, ctx, code, canSend);
+    const outcome = await runSandbox(env, ctx, code, caps);
     if (outcome.ok) {
       return { ok: true as const, result: outcome.result, code, attempt };
     }
@@ -174,7 +255,7 @@ async function generate(
 }
 
 export function dara(env: Env, ctx: ExecutionContext, task: string) {
-  return generate(env, ctx, true, [
+  return generate(env, ctx, { canSend: true, canWrite: true }, [
     { role: "system", content: SYSTEM },
     { role: "user", content: task },
   ]);
@@ -187,7 +268,7 @@ export async function daraSms(
   ctx: ExecutionContext,
   history: string,
 ) {
-  const outcome = await generate(env, ctx, false, [
+  const outcome = await generate(env, ctx, {}, [
     { role: "system", content: SMS_SYSTEM },
     { role: "user", content: history },
   ]);

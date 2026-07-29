@@ -27,7 +27,7 @@ export const Dashboard = () => {
 
   if (isLoading) {
     return (
-      <div className="w-8 h-8 border-4 border-spinner border-t-transparent rounded-full animate-spin my-auto"></div>
+      <div></div>
     );
   }
 

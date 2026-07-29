@@ -1,6 +1,6 @@
 // Docs: https://www.instantdb.com/docs/modeling-data
 
-import { i } from "@instantdb/core";
+import { i } from "@instantdb/react";
 
 const _schema = i.schema({
   entities: {
@@ -14,23 +14,25 @@ const _schema = i.schema({
       "phone": i.string().optional(),
       "type": i.string().optional(),
     }),
-    "activities": i.entity({}),
     "customers": i.entity({
       "name": i.any().optional(),
       "phone": i.string().unique().indexed().optional(),
     }),
-    "devices": i.entity({}),
     "messages": i.entity({
-      "body": i.string().optional(),
-      "createdAt": i.date().optional(),
-      "direction": i.string().optional(),
-      "from": i.string().optional(),
+      "body": i.any().optional(),
+      "createdAt": i.any().optional(),
+      "direction": i.any().optional(),
+      "from": i.any().optional(),
       "sid": i.string().unique().indexed().optional(),
-      "to": i.string().optional(),
+      "to": i.any().optional(),
     }),
     "offices": i.entity({
       "fullName": i.any().optional(),
       "name": i.any().optional(),
+    }),
+    "orderFrom": i.entity({
+      "description": i.any().optional(),
+      "placeId": i.any().optional(),
     }),
     "orderItems": i.entity({
       "consoles": i.any().optional(),
@@ -45,8 +47,10 @@ const _schema = i.schema({
       "amountTotal": i.any().optional(),
       "clearance": i.any().optional(),
       "createdAt": i.any().optional(),
-      "from": i.any().optional(),
-      "to": i.any().optional(),
+    }),
+    "orderTo": i.entity({
+      "description": i.any().optional(),
+      "placeId": i.any().optional(),
     }),
     "packages": i.entity({
       "height": i.any().optional(),
@@ -57,6 +61,7 @@ const _schema = i.schema({
       "width": i.any().optional(),
     }),
     "shipments": i.entity({
+      "createdAt": i.any().optional(),
       "title": i.any().optional(),
     }),
   },
@@ -74,19 +79,6 @@ const _schema = i.schema({
         "label": "linkedGuestUsers"
       }
     },
-    "customersMessages": {
-      "forward": {
-        "on": "customers",
-        "has": "many",
-        "label": "messages"
-      },
-      "reverse": {
-        "on": "messages",
-        "has": "one",
-        "label": "customers",
-        "onDelete": "cascade"
-      }
-    },
     "customersOrders": {
       "forward": {
         "on": "customers",
@@ -98,6 +90,31 @@ const _schema = i.schema({
         "has": "one",
         "label": "customers",
         "onDelete": "cascade"
+      }
+    },
+    "messagesCustomers": {
+      "forward": {
+        "on": "messages",
+        "has": "one",
+        "label": "customers"
+      },
+      "reverse": {
+        "on": "customers",
+        "has": "many",
+        "label": "messages"
+      }
+    },
+    "orderFromOrders": {
+      "forward": {
+        "on": "orderFrom",
+        "has": "one",
+        "label": "orders",
+        "onDelete": "cascade"
+      },
+      "reverse": {
+        "on": "orders",
+        "has": "one",
+        "label": "orderFrom"
       }
     },
     "ordersOrderItems": {
@@ -124,6 +141,19 @@ const _schema = i.schema({
         "on": "shipments",
         "has": "many",
         "label": "orders"
+      }
+    },
+    "orderToOrders": {
+      "forward": {
+        "on": "orderTo",
+        "has": "one",
+        "label": "orders",
+        "onDelete": "cascade"
+      },
+      "reverse": {
+        "on": "orders",
+        "has": "one",
+        "label": "orderTo"
       }
     },
     "packagesOrders": {

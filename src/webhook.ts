@@ -1,4 +1,4 @@
-import { init, id, lookup } from "@instantdb/admin";
+import { init, id } from "@instantdb/admin";
 import schema from "../instant.schema";
 import Stripe from "stripe";
 import twilio from "twilio";
@@ -28,8 +28,8 @@ async function replyWithDara(
     const history = messages
       .sort(
         (a, b) =>
-          new Date(a.createdAt ?? 0).getTime() -
-          new Date(b.createdAt ?? 0).getTime(),
+          new Date((a.createdAt as string | number) ?? 0).getTime() -
+          new Date((b.createdAt as string | number) ?? 0).getTime(),
       )
       .slice(-8)
       .map(
@@ -95,32 +95,37 @@ export async function handleTwilioWebhook(
       return new Response("Not a message webhook", { status: 400 });
     }
 
-    const { customers } = await db.query({
+    const { customers, messages: existing } = await db.query({
       customers: { $: { where: { phone: params.From || "" } } },
+      messages: { $: { where: { sid } } },
     });
     const customer = customers[0];
 
-    // Upsert by sid so Twilio's webhook retries stay idempotent.
-    await db.transact(
-      db.tx.messages[lookup("sid", sid)]
-        .update({
-          body: params.Body || "",
+    // Twilio retries deliveries; if this sid is already stored, just ack so
+    // the message isn't duplicated and Dara doesn't reply twice.
+    if (existing.length === 0) {
+      await db.transact(
+        db.tx.messages[id()]
+          .create({
+            sid,
+            body: params.Body || "",
+            from: params.From || "",
+            to: params.To || "",
+            direction: "inbound",
+            createdAt: new Date(),
+          })
+          .link(customer ? { customers: customer.id } : {}),
+      );
+
+      // Dara answers after the response goes out; Twilio only waits ~15s.
+      ctx.waitUntil(
+        replyWithDara(env, ctx, {
           from: params.From || "",
           to: params.To || "",
-          direction: "inbound",
-          createdAt: new Date(),
-        })
-        .link(customer ? { customers: customer.id } : {}),
-    );
-
-    // Dara answers after the response goes out; Twilio only waits ~15s.
-    ctx.waitUntil(
-      replyWithDara(env, ctx, {
-        from: params.From || "",
-        to: params.To || "",
-        customerId: customer?.id,
-      }),
-    );
+          customerId: customer?.id,
+        }),
+      );
+    }
 
     // Empty TwiML: acknowledge without sending an auto-reply.
     return new Response('<?xml version="1.0" encoding="UTF-8"?><Response/>', {

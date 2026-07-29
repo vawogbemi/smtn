@@ -1,159 +1,65 @@
-import { Form, TextArea } from "@react-spectrum/s2";
 import {
-    IconCircleFilled,
-    IconSquareFilled,
+  IconMessageCircleFilled,
 } from "@tabler/icons-react";
-import { newHttpBatchRpcSession, RpcStub } from "capnweb";
-import { useState } from "react";
-import {
-    useNavigate,
-    useParams,
-} from "react-router";
-import { db } from "../../instant";
-import { Button } from "../components/Button";
-import { PackageField } from "../components/PackageField";
-import { PlacesTextField } from "../components/PlacesTextField";
-import { Tab, TabList, Tabs } from "../components/Tabs";
-import { Spinner } from "../components/misc";
+import { Link } from "react-router";
 
-interface API {
-  submit(data: any): Promise<string>;
-}
+const PHONE_SMS = "sms:+16479526586";
 
-export const Index = () => {
-  const navigate = useNavigate();
 
-  const [product, setProduct] = useState("");
+export const Index = () => (
+  <div className="relative flex h-full w-full flex-col overflow-hidden bg-[#0b0b0c]">
+    <div aria-hidden className="pointer-events-none absolute inset-0">
+      <div className="absolute -top-24 left-1/4 h-96 w-96 rounded-full bg-amber-700/20 blur-3xl" />
+      <div className="absolute bottom-0 right-1/4 h-96 w-96 rounded-full bg-primary/20 blur-3xl" />
+    </div>
 
-  const [formData, setFormData] = useState({
-    name: "",
-    phone: "",
-    from: "",
-    to: "",
-    description: "",
-    package: "",
-    product: "",
-  });
+    <header className="relative z-10 flex items-center justify-between px-6 pt-6 md:px-10 md:pt-8">
+      <div className="flex items-center gap-2">
+        <img
+          src="https://public.smtncargo.com/smtnlogo.jpg"
+          alt="SMTN Cargo"
+          className="h-8 w-8 rounded-lg object-contain object-top"
+        />
+        <span className="text-lg font-extrabold tracking-tight text-white">
+          SMTN
+        </span>
+      </div>
+      <div className="flex items-center gap-3">
+        <Link
+          to="/dashboard"
+          className="rounded-full border border-white/15 bg-white/5 px-4 py-2 text-sm font-medium text-white/90 hover:bg-white/10"
+        >
+          Login
+        </Link>
+        <a
+          href={PHONE_SMS}
+          className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
+        >
+          Get Started
+        </a>
+      </div>
+    </header>
 
-  const update = (field: string, value: string) =>
-    setFormData((prev) => ({ ...prev, [field]: value }));
+    <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-10 px-6 py-8 md:flex-row md:justify-between md:gap-6 md:px-16">
+      <div className="max-w-md text-center md:text-left">
+        <h1 className="text-4xl font-extrabold leading-[1.05] tracking-tight text-white sm:text-5xl md:text-6xl">
+          Ship your cargo
+          <br className="hidden md:block" /> on iMessage.
+        </h1>
+      </div>
 
-  return (
-    <Form
-      UNSAFE_className="h-full w-full flex flex-col items-center py-8 px-4 bg-surface"
-      onSubmit={async (event) => {
-        event.preventDefault();
-        /*const formData = new FormData(event.target as HTMLFormElement);
-        const data = Object.fromEntries(formData.entries());
-        console.log(data);*/
-        return;
-        try {
-          const api: RpcStub<API> = newHttpBatchRpcSession(
-            "https://api.smtncargo.com/rpc",
-          );
-          const checkoutLink = await api.submit(formData);
-          navigate(checkoutLink);
-        } catch (error) {
-          console.error("API error:", error);
-        }
-      }}
-    >
-      <img
-        src="https://public.smtncargo.com/logo.png"
-        className="w-24 h-24 object-contain object-top"
-      />
-      {
-        /*<TextField
-        label="Name (Optional)"
-        value={formData.name}
-        onChange={(v) => update("name", v)}
-        className="w-full"
-      />*/
-      }
-      <PlacesTextField
-        label="From"
-        icon={<IconCircleFilled className="text-primary" />}
-        onChange={(v) => update("from", v)}
-        value={formData.from}
-        className="w-full"
-      />
-      <PlacesTextField
-        label="To"
-        icon={<IconSquareFilled className="text-primary" />}
-        value={formData.to}
-        onChange={(v) => update("to", v)}
-        className="w-full"
-      />
 
-      <TextArea
-        label="Description"
-        name="description"
-        value={formData.description}
-        onChange={(v) => update("description", v)}
-      />
-      <PackageField />
-      <Tabs
-        selectedKey={product}
-        onSelectionChange={(key) => setProduct(String(key))}
-        orientation="vertical"
-      >
-        <TabList aria-label="Product">
-          <Tab id="air">
-            <div className="flex flex-row items-center justify-center gap-3">
-              <img
-                src="https://public.airtoronto.ca/air.png"
-                alt="airplane-front-view"
-                className="w-10 h-10 shrink-0"
-              />
-              <div className="flex flex-col items-start">
-                <span className="font-semibold text-text-primary text-md">
-                  Air
-                </span>
-                <span className="text-text-muted">5-10 days</span>
-              </div>
-            </div>
-          </Tab>
-          <Tab id="freight">
-            <div className="flex flex-row items-center gap-3">
-              <img
-                src="https://public.airtoronto.ca/freight.png"
-                alt="water-transportation"
-                className="w-10 h-10 shrink-0"
-              />
-              <div className="flex flex-col items-start">
-                <span className="font-semibold text-text-primary text-md">
-                  Freight
-                </span>
-                <span className="text-text-muted">2 months</span>
-              </div>
-            </div>
-          </Tab>
-          <Tab id="x">
-            <div className="flex flex-row items-center gap-3">
-              <img
-                src="https://public.airtoronto.ca/x.png"
-                alt="tesla-front-view"
-                className="w-9 h-9 shrink-0"
-              />
-              <div className="flex flex-col items-start">
-                <span className="font-semibold text-text-primary text-md">
-                  X
-                </span>
-                <span className="text-text-muted">1-2 days</span>
-              </div>
-            </div>
-          </Tab>
-        </TabList>
-      </Tabs>
-      <Button
-        type="submit"
-        variant="primary"
-        className="w-full text-white min-h-15"
-      >
-        Submit
-      </Button>
-    </Form>
-  );
-};
+      <div className="flex flex-col items-center gap-3 text-center md:items-end md:text-right">
+        <a
+          href={PHONE_SMS}
+          className="flex items-center gap-2 rounded-full bg-[#34c759] px-5 py-3 font-semibold text-white shadow-lg shadow-black/30 transition-transform hover:scale-[1.02]"
+        >
+          <IconMessageCircleFilled className="h-5 w-5" />
+          Ready to ship?
+        </a>
+      </div>
+    </div>
+  </div>
+);
 
 export default Index;

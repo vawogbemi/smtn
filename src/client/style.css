@@ -34,6 +34,24 @@
   --text-muted: #767a82;
 }
 
+/* Same values as :root; lets a wrapper force light inside a dark page. */
+[data-theme="light"] {
+  --primary: #0057b8;
+  --secondary: #004a9e;
+  --accent: #1a7de8;
+  --spinner: #0057b8;
+
+  --surface: #ffffff;
+  --surface-alt: #f6f7f8;
+  --border: #e7e8ea;
+  --border-muted: #f0f1f3;
+  --hover: #f1f2f4;
+
+  --text-primary: #1b1c1f;
+  --text-secondary: #45484e;
+  --text-muted: #767a82;
+}
+
 [data-theme="dark"] {
   /* Brand — brightened cobalt for contrast on dark surfaces */
   --primary: #4c8dff;

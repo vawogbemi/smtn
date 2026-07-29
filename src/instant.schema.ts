@@ -14,19 +14,17 @@ const _schema = i.schema({
       "phone": i.string().optional(),
       "type": i.string().optional(),
     }),
-    "activities": i.entity({}),
     "customers": i.entity({
       "name": i.any().optional(),
       "phone": i.string().unique().indexed().optional(),
     }),
-    "devices": i.entity({}),
     "messages": i.entity({
-      "body": i.string().optional(),
-      "createdAt": i.date().optional(),
-      "direction": i.string().optional(),
-      "from": i.string().optional(),
+      "body": i.any().optional(),
+      "createdAt": i.any().optional(),
+      "direction": i.any().optional(),
+      "from": i.any().optional(),
       "sid": i.string().unique().indexed().optional(),
-      "to": i.string().optional(),
+      "to": i.any().optional(),
     }),
     "offices": i.entity({
       "fullName": i.any().optional(),
@@ -80,19 +78,6 @@ const _schema = i.schema({
         "label": "linkedGuestUsers"
       }
     },
-    "customersMessages": {
-      "forward": {
-        "on": "customers",
-        "has": "many",
-        "label": "messages"
-      },
-      "reverse": {
-        "on": "messages",
-        "has": "one",
-        "label": "customers",
-        "onDelete": "cascade"
-      }
-    },
     "customersOrders": {
       "forward": {
         "on": "customers",
@@ -104,6 +89,18 @@ const _schema = i.schema({
         "has": "one",
         "label": "customers",
         "onDelete": "cascade"
+      }
+    },
+    "messagesCustomers": {
+      "forward": {
+        "on": "messages",
+        "has": "one",
+        "label": "customers"
+      },
+      "reverse": {
+        "on": "customers",
+        "has": "many",
+        "label": "messages"
       }
     },
     "orderFromOrders": {
