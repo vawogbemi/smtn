@@ -7,7 +7,6 @@ import {
   OverlayTriggerStateContext,
   Selection,
 } from "react-aria-components";
-import { newHttpBatchRpcSession, RpcStub } from "capnweb";
 import {
   IconCircleCheck,
   IconFileText,
@@ -17,35 +16,25 @@ import {
 } from "@tabler/icons-react";
 import { Button } from "./Button";
 import { Checkbox } from "@react-spectrum/s2";
-import { db, id } from "../../instant";
+import { refetchAll, useTenantApi } from "../data";
 import { useParams } from "react-router";
 import { Lagos_Office, Toronto_Office } from "../../offices";
 import { DEFAULT_SHIPMENT_TITLE } from "../routes/shipments";
 
+// Nullable throughout: parseFile's JSON schema tells the model to return null
+// for anything it can't find in the manifest.
 type Package = {
   id: string;
-  number: string | number;
-  name: string;
-  length: number;
-  width: number;
-  height: number;
-  weight: number;
-  phone: string;
+  number?: string | number | null;
+  name?: string | null;
+  length?: number | null;
+  width?: number | null;
+  height?: number | null;
+  weight?: number | null;
+  phone?: string | null;
 };
 
-interface API {
-  parseFile(file: {
-    name: string;
-    type: string;
-    size: number;
-    data: string;
-  }): Promise<Package[]>;
-}
-
 type Status = "idle" | "busy" | "done" | "error";
-
-const api = () =>
-  newHttpBatchRpcSession("https://api.smtncargo.com/rpc") as RpcStub<API>;
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -78,6 +67,7 @@ export const ImportShipment = ({ onDone }: { onDone?: () => void }) => {
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  const getApi = useTenantApi();
   const [packages, setPackages] = useState<Package[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<Selection>(new Set());
   const [isImporting, setIsImporting] = useState(false);
@@ -104,7 +94,7 @@ export const ImportShipment = ({ onDone }: { onDone?: () => void }) => {
     setSelectedKeys(new Set());
     try {
       const payload = await fileToPayload(next);
-      const parsed = await api().parseFile(payload);
+      const parsed = await (await getApi()).parseFile(payload);
       setPackages(parsed.map((pkg, i) => ({ ...pkg, id: String(i) })));
       setStatus("done");
     } catch (e) {
@@ -238,82 +228,34 @@ export const ImportShipment = ({ onDone }: { onDone?: () => void }) => {
                         !(selectedKeys as Set<string>).has(pkg.id),
                     );
 
-                    const { data } = await db.queryOnce({
-                      shipments: {
-                        $: { where: { id: shipmentId } },
+                    if (!shipmentId) return;
+
+                    // Customer dedupe by phone, order/package creation, and the
+                    // shipment rename all happen inside the tenant object now,
+                    // in a single transaction.
+                    await (await getApi()).importPackages({
+                      shipmentId,
+                      fileName: file?.name ?? null,
+                      defaultTitle: DEFAULT_SHIPMENT_TITLE,
+                      from: {
+                        description: Lagos_Office.description,
+                        placeId: Lagos_Office.placeId,
                       },
-                      customers: {
-                        $: {
-                          where: {
-                            phone: {
-                              $in: [
-                                ...new Set(toImport.map((pkg) => pkg.phone)),
-                              ],
-                            },
-                          },
-                        },
+                      to: {
+                        description: Toronto_Office.description,
+                        placeId: Toronto_Office.placeId,
                       },
+                      packages: toImport.map((pkg) => ({
+                        number: pkg.number == null ? null : String(pkg.number),
+                        name: pkg.name ?? null,
+                        phone: pkg.phone ?? null,
+                        weight: pkg.weight ?? null,
+                        length: pkg.length ?? null,
+                        width: pkg.width ?? null,
+                        height: pkg.height ?? null,
+                      })),
                     });
-
-                    const shipment = data.shipments[0];
-
-                    const phoneToId: Record<string, string> = Object
-                      .fromEntries(
-                        data.customers
-                          .filter((c): c is typeof c & { phone: string } =>
-                            Boolean(c.phone)
-                          )
-                          .map((c) => [c.phone, c.id]),
-                      );
-
-                    const txs = toImport.flatMap((pkg) => {
-                      const orderId = id();
-                      const isNew = !(pkg.phone in phoneToId);
-                      const customerId = (phoneToId[pkg.phone] ??= id());
-                      return [
-                        db.tx.orders[orderId]
-                          .update({})
-                          .link({ shipments: shipmentId }),
-                        db.tx.orderFrom[id()]
-                          .create({
-                            description: Lagos_Office.description,
-                            placeId: Lagos_Office.placeId,
-                          })
-                          .link({ orders: orderId }),
-                        db.tx.orderTo[id()]
-                          .create({
-                            description: Toronto_Office.description,
-                            placeId: Toronto_Office.placeId,
-                          })
-                          .link({ orders: orderId }),
-                        db.tx.customers[customerId]
-                          .update(
-                            isNew ? { phone: pkg.phone, name: pkg.name } : {},
-                          )
-                          .link({ orders: orderId }),
-                        db.tx.packages[id()]
-                          .create({
-                            number: pkg.number,
-                            weight: pkg.weight,
-                            length: pkg.length,
-                            width: pkg.width,
-                            height: pkg.height,
-                          })
-                          .link({ orders: orderId }),
-                      ];
-                    });
-
-                    const renameTx =
-                      shipmentId && shipment &&
-                        shipment.title === DEFAULT_SHIPMENT_TITLE && file
-                        ? [
-                          db.tx.shipments[shipmentId].update({
-                            title: file.name,
-                          }),
-                        ]
-                        : [];
-
-                    await db.transact([...txs, ...renameTx]);
+                    refetchAll();
                     close();
                   } finally {
                     setIsImporting(false);

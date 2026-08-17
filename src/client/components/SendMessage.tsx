@@ -4,19 +4,9 @@ import {
   TextField,
 } from "react-aria-components";
 import { Tab, TabList, Tabs } from "@react-spectrum/s2";
-import { newHttpBatchRpcSession, RpcStub } from "capnweb";
 import { Button } from "./Button";
 import { Description, Label, TextArea } from "./Field";
-import { db } from "../../instant";
-
-interface API {
-  sendMessage(
-    messages: { to: string; body: string }[],
-  ): Promise<{ sent: number; failed: number }>;
-}
-
-const api = () =>
-  newHttpBatchRpcSession("https://api.smtncargo.com/rpc") as RpcStub<API>;
+import { useQuery, useTenantApi } from "../data";
 
 const TEMPLATES = [
   {
@@ -47,20 +37,12 @@ export const SendMessage = (
   const [body, setBody] = useState(TEMPLATES[0].body);
   const [isSending, setIsSending] = useState(false);
 
-  const { data } = db.useQuery(
-    orderIds.length > 0
-      ? {
-        orders: {
-          $: { where: { id: { $in: orderIds } } },
-          customers: {},
-        },
-      }
-      : null,
-  );
+  const getApi = useTenantApi();
+  const { data: orders } = useQuery("ordersByIds", orderIds);
 
   const recipients = useMemo(() => {
     const byPhone = new Map<string, { name: string; phone: string }>();
-    for (const order of data?.orders ?? []) {
+    for (const order of orders ?? []) {
       const customer = order.customers;
       if (customer?.phone && !byPhone.has(customer.phone)) {
         byPhone.set(customer.phone, {
@@ -70,7 +52,7 @@ export const SendMessage = (
       }
     }
     return [...byPhone.values()];
-  }, [data]);
+  }, [orders]);
 
   const example = body.replaceAll(
     "{name}",
@@ -158,7 +140,7 @@ export const SendMessage = (
             if (isSending) return;
             setIsSending(true);
             try {
-              await api().sendMessage(
+              await (await getApi()).sendMessage(
                 recipients.map((r) => ({
                   to: r.phone,
                   body: body.replaceAll("{name}", r.name),

@@ -4,11 +4,15 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "test": "vitest run",
     "deploy": "vite build && wrangler deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {
     "@adobe/react-spectrum": "^3.47.1",
+    "@clerk/backend": "^3.16.4",
+    "@clerk/clerk-react": "^5.61.3",
+    "@cloudflare/codemode": "^0.5.1",
     "@cloudflare/vite-plugin": "^1.40.2",
     "@cloudflare/workers-types": "^4.20260615.1",
     "@instantdb/admin": "^0.22.81",
@@ -18,8 +22,8 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "add": "^2.0.6",
-    "agents": "^0.2.31",
-    "ai": "^5.0.108",
+    "agents": "^0.20.1",
+    "ai": "^7.0.66",
     "capnweb": "^0.2.0",
     "fflate": "^0.8.3",
     "hono": "^4.12.23",
@@ -40,9 +44,11 @@
     "zod": "^4.1.13"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.21.1",
     "@tailwindcss/vite": "^4.3.1",
     "@vitejs/plugin-react": "^6.0.2",
     "tailwindcss": "^4.3.1",
+    "vitest": "4.1.10",
     "wrangler": "^4.100.0"
   }
 }

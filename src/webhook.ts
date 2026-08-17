@@ -1,9 +1,9 @@
-import { init, id } from "@instantdb/admin";
-import schema from "../instant.schema";
 import Stripe from "stripe";
 import twilio from "twilio";
 import { RPC, type Env, type Order } from "./rpc";
-import { daraSms } from "./codemode";
+import { daraSms } from "./agent/codemode";
+import { tenantForNumber } from "./directory";
+import type { TenantDO } from "./tenant";
 
 // Runs in ctx.waitUntil after the webhook has already responded: builds the
 // conversation history, asks Dara for a reply, texts it to the sender only,
@@ -11,49 +11,72 @@ import { daraSms } from "./codemode";
 async function replyWithDara(
   env: Env,
   ctx: ExecutionContext,
-  opts: { from: string; to: string; customerId?: string },
+  opts: {
+    from: string;
+    to: string;
+    orgId: string;
+    tenant: DurableObjectStub<TenantDO>;
+    customerId: string;
+  },
 ) {
-  const db = init({
-    appId: env.INSTANT_DB_APP_ID,
-    adminToken: env.INSTANT_DB_ADMIN_TOKEN,
-    schema: schema,
-  });
-
   try {
-    const { messages } = await db.query({
-      messages: {
-        $: { where: { or: [{ from: opts.from }, { to: opts.from }] } },
-      },
-    });
-    const history = messages
-      .sort(
-        (a, b) =>
-          new Date((a.createdAt as string | number) ?? 0).getTime() -
-          new Date((b.createdAt as string | number) ?? 0).getTime(),
-      )
-      .slice(-8)
-      .map(
-        (m) => `${m.direction === "inbound" ? "Customer" : "Dara"}: ${m.body ?? ""}`,
-      )
-      .join("\n");
+    // Scoped to this customer's thread via the Agents SDK Session API (kept
+    // in sync with the messages table by recordMessage's write fan-out, see
+    // tenant.ts). Labeled by actor at write time (so an operator's reply
+    // doesn't read back to Dara as its own) and byte-budgeted on read,
+    // replacing the old hand-rolled buildHistory(thread(...)) truncation.
+    const messages = await opts.tenant.getSessionHistory(opts.customerId);
 
-    const reply = await daraSms(env, ctx, history);
-    if (!reply) return;
+    const outcome = await daraSms(env, ctx, opts.orgId, messages, opts.customerId);
 
+    // Both failure modes used to end here silently: the customer got no reply
+    // and nobody found out. They are now the top of the operator inbox.
+    if (!outcome.ok || !outcome.reply) {
+      await opts.tenant.recordEvent({
+        type: outcome.ok ? "agent.silent" : "agent.failed",
+        actor: "dara",
+        summary: outcome.ok
+          ? `Dara produced no reply for ${opts.from}`
+          : `Dara failed to answer ${opts.from}`,
+        status: "needs_review",
+        payload: { steps: outcome.steps, error: outcome.error },
+        customerId: opts.customerId,
+      });
+      return;
+    }
+
+    const reply = outcome.reply;
     await new RPC(env, ctx).sendMessage([{ to: opts.from, body: reply }]);
-    await db.transact(
-      db.tx.messages[id()]
-        .create({
-          body: reply,
-          from: opts.to,
-          to: opts.from,
-          direction: "outbound",
-          createdAt: new Date(),
-        })
-        .link(opts.customerId ? { customers: opts.customerId } : {}),
-    );
+    await opts.tenant.recordMessage({
+      id: crypto.randomUUID(),
+      customerId: opts.customerId,
+      direction: "outbound",
+      actor: "dara",
+      body: reply,
+      from: opts.to,
+      to: opts.from,
+    });
+    await opts.tenant.recordEvent({
+      type: "message.out",
+      actor: "dara",
+      summary: reply.slice(0, 140),
+      payload: { steps: outcome.steps },
+      customerId: opts.customerId,
+    });
   } catch (error) {
     console.error("Dara SMS reply failed:", error);
+    await opts.tenant
+      .recordEvent({
+        type: "agent.error",
+        actor: "system",
+        summary: `Dara reply threw for ${opts.from}`,
+        status: "failed",
+        payload: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        customerId: opts.customerId,
+      })
+      .catch((e) => console.error("Could not record agent.error:", e));
   }
 }
 
@@ -62,12 +85,6 @@ export async function handleTwilioWebhook(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const db = init({
-    appId: env.INSTANT_DB_APP_ID,
-    adminToken: env.INSTANT_DB_ADMIN_TOKEN,
-    schema: schema,
-  });
-
   try {
     const signature = request.headers.get("x-twilio-signature");
     if (!signature) {
@@ -95,35 +112,48 @@ export async function handleTwilioWebhook(
       return new Response("Not a message webhook", { status: 400 });
     }
 
-    const { customers, messages: existing } = await db.query({
-      customers: { $: { where: { phone: params.From || "" } } },
-      messages: { $: { where: { sid } } },
-    });
-    const customer = customers[0];
+    const from = params.From || "";
+    const to = params.To || "";
+    const body = params.Body || "";
 
-    // Twilio retries deliveries; if this sid is already stored, just ack so
-    // the message isn't duplicated and Dara doesn't reply twice.
-    if (existing.length === 0) {
-      await db.transact(
-        db.tx.messages[id()]
-          .create({
-            sid,
-            body: params.Body || "",
-            from: params.From || "",
-            to: params.To || "",
-            direction: "inbound",
-            createdAt: new Date(),
-          })
-          .link(customer ? { customers: customer.id } : {}),
+    // Which forwarder owns the number the customer texted. An unclaimed number
+    // is acked rather than errored -- Twilio would retry forever otherwise, and
+    // there is no tenant whose inbox could show the problem.
+    const owner = await tenantForNumber(env, to);
+    if (!owner) {
+      console.error(`No organization has claimed ${to}; dropping message`);
+      return new Response(
+        '<?xml version="1.0" encoding="UTF-8"?><Response/>',
+        { headers: { "Content-Type": "text/xml" } },
       );
+    }
+    const { orgId, tenant } = owner;
+    const customerId = await tenant.upsertCustomer(from);
+
+    // Twilio retries deliveries; recordMessage reports the sid as already
+    // stored, so we ack without duplicating it or replying twice.
+    const isNew = await tenant.recordMessage({
+      id: crypto.randomUUID(),
+      sid,
+      customerId,
+      direction: "inbound",
+      actor: "customer",
+      body,
+      from,
+      to,
+    });
+
+    if (isNew) {
+      await tenant.recordEvent({
+        type: "message.in",
+        actor: "customer",
+        summary: body.slice(0, 140),
+        customerId,
+      });
 
       // Dara answers after the response goes out; Twilio only waits ~15s.
       ctx.waitUntil(
-        replyWithDara(env, ctx, {
-          from: params.From || "",
-          to: params.To || "",
-          customerId: customer?.id,
-        }),
+        replyWithDara(env, ctx, { from, to, orgId, tenant, customerId }),
       );
     }
 
@@ -146,11 +176,6 @@ export async function handleStripeWebhook(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const stripe = new Stripe(env.STRIPE_SECRET_KEY);
-  const db = init({
-    appId: env.INSTANT_DB_APP_ID,
-    adminToken: env.INSTANT_DB_ADMIN_TOKEN,
-    schema: schema,
-  });
 
   try {
     const body = await request.text();
@@ -176,10 +201,16 @@ export async function handleStripeWebhook(
     }
 
     switch (event.type) {
+      // FIXME: still a no-op -- a completed checkout creates no order. Unchanged
+      // by the storage migration; it needs the booking flow fixed alongside it.
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
-        const deviceId = session.client_reference_id;
         const metadata = JSON.parse(session.metadata?.value || "{}") as Order;
+        console.warn("checkout.session.completed not handled", {
+          sessionId: session.id,
+          metadata,
+        });
+        break;
       }
 
       case "checkout.session.expired":

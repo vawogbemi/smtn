@@ -33,24 +33,55 @@
 			"binding": "LOADER"
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "TENANT",
+				"class_name": "TenantDO"
+			},
+			{
+				"name": "REGISTRY",
+				"class_name": "RegistryDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"TenantDO"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"RegistryDO"
+			]
+		}
+	],
+	"workers_dev": true,
+	"preview_urls": true,
 	"routes": [
 		{
 			"pattern": "api.smtncargo.com",
 			"zone_name": "smtncargo.com",
 			"custom_domain": true,
-	
+			"enabled": true,
+			"previews_enabled": false
 		},
 		{
 			"pattern": "smtncargo.com",
 			"zone_name": "smtncargo.com",
 			"custom_domain": true,
+			"enabled": true,
+			"previews_enabled": false
 		},
 		{
 			"pattern": "www.smtncargo.com",
 			"zone_name": "smtncargo.com",
 			"custom_domain": true,
+			"enabled": true,
+			"previews_enabled": false
 		}
 	],
-	"workers_dev": true,
-	"preview_urls": true,
 }

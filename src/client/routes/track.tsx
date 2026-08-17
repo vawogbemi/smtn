@@ -3,9 +3,7 @@ import { ListBox, ListBoxItem } from "../components/ListBox";
 import { Button } from "../components/Button";
 import { PlacesTextField } from "../components/PlacesTextField";
 import { FormEvent, useRef, useState } from "react";
-import { newHttpBatchRpcSession, RpcStub } from "capnweb";
-import { useNavigate, useParams } from "react-router";
-import { db } from "../../instant";
+import { publicApi } from "../data";
 import {
   IconCircleFilled,
   IconHistory,
@@ -44,20 +42,7 @@ interface ShippingProduct {
   providerImage200?: string;
 }
 
-interface API {
-  submit(formData: any): Promise<string>;
-  getPlaceSuggestions(input: string): Promise<PlaceSuggestion[]>;
-  getProducts(
-    place: PlaceSuggestion,
-    office: PlaceSuggestion,
-    packages: Package[],
-  ): Promise<ShippingProduct[]>;
-}
-
 export const Track = () => {
-  const navigate = useNavigate();
-  const params = useParams();
-
   const [addressInput, setAddressInput] = useState("");
   const [addressSuggestions, setAddressSuggestions] = useState<
     PlaceSuggestion[]
@@ -70,14 +55,6 @@ export const Track = () => {
   );
   const [isLoadingProducts, setIsLoadingProducts] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const { isLoading, error, data } = db.useQuery({
-    orders: {
-      $: { where: { id: params.orderId } },
-    },
-  });
-
-  const order = data?.orders?.[0];
 
   const handleAddressChange = (value: string) => {
     setAddressInput(value);
@@ -93,10 +70,7 @@ export const Track = () => {
     }
     debounceRef.current = setTimeout(async () => {
       try {
-        const api: RpcStub<API> = newHttpBatchRpcSession(
-          "https://api.smtncargo.com/rpc",
-        );
-        setAddressSuggestions(await api.getPlaceSuggestions(value));
+        setAddressSuggestions(await publicApi().getPlaceSuggestions(value));
         console.log(addressSuggestions);
       } catch (error) {
         console.error("API error:", error);
@@ -117,10 +91,7 @@ export const Track = () => {
     setIsLoadingProducts(true);
 
     try {
-      const api: RpcStub<API> = newHttpBatchRpcSession(
-        "https://api.smtncargo.com/rpc",
-      );
-      const results = await api.getProducts(
+      const results = await publicApi().getProducts(
         {
           description:
             "SMTN International Inc., Bath Road, Mississauga, ON, Canada",
@@ -154,29 +125,12 @@ export const Track = () => {
       new FormData(event.target as HTMLFormElement) as any,
     );
     try {
-      const api: RpcStub<API> = newHttpBatchRpcSession(
-        "https://api.smtncargo.com/rpc",
-      );
-      const checkoutLink = await api.submit(formData);
+      const checkoutLink = await publicApi().submit(formData);
       // navigate(checkoutLink);
     } catch (error) {
       console.error("API error:", error);
     }
   };
-
-  if (isLoading) {
-    return (
-      <div className="w-8 h-8 border-4 border-spinner border-t-transparent rounded-full animate-spin my-auto" />
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="text-primary">
-        An error occurred, please try again later
-      </div>
-    );
-  }
 
   return (
     <Form

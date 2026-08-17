@@ -12,7 +12,10 @@
     ],
     "jsx": "react-jsx",
     "jsxImportSource": "react",
-    "types": ["@cloudflare/workers-types"]
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types"
+    ]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", ".wrangler"]

@@ -119,70 +119,22 @@ export function GridList<T extends object>({
             onChange={toggleSelectAll}
             UNSAFE_className="mr-3"
           />
-          {hasAnySelected && (
-            <>
-              <DialogTrigger>
-                <Button
-                  variant="quiet"
-                  aria-label="Send Message"
-                  className="rounded-full h-6 px-2 text-xs md:h-8 md:px-3 md:text-sm"
-                >
-                  Send Message
-                </Button>
-                <Modal isDismissable className="h-full">
-                  <Dialog className="h-full outline-none">
-                    <SendMessage orderIds={selectedIds} />
-                  </Dialog>
-                </Modal>
-              </DialogTrigger>
-              <DialogTrigger>
-                <Button
-                  variant="quiet"
-                  aria-label="Filter"
-                  className="rounded-full h-6 px-2 text-xs md:h-8 md:px-3 md:text-sm"
-                >
-                  Print Labels
-                </Button>
-                <Modal isDismissable className="h-full">
-                  <Dialog className="h-full outline-none">
-                    <ImportShipment />
-                  </Dialog>
-                </Modal>
-              </DialogTrigger>
-            </>
-          )}
-          {!hasAnySelected && (
-            <>
-              <DialogTrigger>
-                <Button
-                  variant="quiet"
-                  aria-label="Filter"
-                  className="rounded-full h-6 px-2 text-xs md:h-8 md:px-3 md:text-sm"
-                >
-                  Import Shipment
-                </Button>
-                <Modal isDismissable className="h-full">
-                  <Dialog className="h-full outline-none">
-                    <ImportShipment />
-                  </Dialog>
-                </Modal>
-              </DialogTrigger>
-              <DialogTrigger>
-                <Button
-                  variant="quiet"
-                  aria-label="Filter"
-                  className="rounded-full h-6 px-2 text-xs md:h-8 md:px-3 md:text-sm"
-                >
-                  Download Manifest
-                </Button>
-                <Modal isDismissable className="h-full">
-                  <Dialog className="h-full outline-none">
-                    <ImportShipment />
-                  </Dialog>
-                </Modal>
-              </DialogTrigger>
-            </>
-          )}
+          <DialogTrigger>
+            <Button
+              variant="quiet"
+              aria-label={hasAnySelected ? "Send message" : "Import shipment"}
+              className="rounded-full h-6 px-2 text-xs md:h-8 md:px-3 md:text-sm"
+            >
+              {hasAnySelected ? "Send Message" : "Import Shipment"}
+            </Button>
+            <Modal isDismissable className="h-full">
+              <Dialog className="h-full outline-none">
+                {hasAnySelected
+                  ? <SendMessage orderIds={selectedIds} />
+                  : <ImportShipment />}
+              </Dialog>
+            </Modal>
+          </DialogTrigger>
         </div>
       )}
       <AriaGridList
