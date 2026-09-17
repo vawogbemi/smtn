@@ -11,11 +11,14 @@ import {
   IconX, IconMicrophone,
   IconCircleCheck, IconCurrencyDollar,
   IconChevronRight, IconInfoCircle,
-  IconShare
+  IconShare, IconSparkles, IconHeadset
 } from "@tabler/icons-react";
 export interface ChatMessage {
   id: string;
-  sender: "user" | "customer" | "system";
+  // "dara" and "operator" are both outbound (SMTN's side of the SMS thread)
+  // but rendered distinctly -- see the message list below -- so staff can
+  // tell the AI's replies apart from a human's.
+  sender: "customer" | "dara" | "operator" | "system";
   text: string;
   timestamp: string;
   status?: "sent" | "delivered" | "read";
@@ -109,12 +112,28 @@ const RouteMap = () => (
 
 type OrderEntity = OrderView;
 
-// The staff-facing, authenticated view: full order list, search, compose.
-// Reached only when there is no tracking token in the URL -- see the Orders
-// wrapper at the bottom of this file, which is what actually gets exported.
+// One row per customer, not per order -- a shipper with three orders has one
+// ongoing SMS thread, not three, and the previous per-order list showed each
+// of those orders as its own (mostly empty) conversation. `orders` is that
+// customer's orders, newest first; `orders[0]` is what the summary card,
+// details drawer, and tracking-link button treat as "the current order"
+// until there's a real per-order picker.
+interface CustomerThread {
+  id: string;
+  name: string | null;
+  phone: string | null;
+  orders: OrderEntity[];
+}
+
+// The staff-facing, authenticated view: full conversation list, search,
+// compose. Reached only when there is no tracking token in the URL -- see
+// the Orders wrapper at the bottom of this file, which is what actually gets
+// exported.
 const StaffOrders = () => {
   const navigate = useNavigate();
-  const { orderId } = useParams();
+  // Same route slot the public tracking link uses (see the Orders wrapper
+  // below), but here it identifies a customer, not an order.
+  const { id: customerId } = useParams();
   const [searchQuery, setSearchQuery] = useState("");
   const [inputText, setInputText] = useState("");
   // Order details -- ETA, route, packages, share -- used to be the whole
@@ -131,14 +150,44 @@ const StaffOrders = () => {
 
   const ordersList: OrderEntity[] = data ?? [];
 
-  // May be undefined: an empty database shows an empty list, not sample data.
-  const activeOrder = ordersList.find((o) => o.id === orderId) ?? ordersList[0];
-  const activeCustomerId = activeOrder?.customers?.id;
+  // Tenant-wide, one query rather than one per customer -- also doubles as
+  // the source for customers who've texted but don't show up in ordersList
+  // below (see customersList).
+  const { data: allMessages } = useQuery("listMessages", 200);
 
-  // The real, persistent conversation: threaded by customer, not by order --
-  // a shipper with three orders has one ongoing SMS thread, not three. Empty
-  // string is a harmless no-op query (no customer_id is ever ""), which keeps
-  // this a plain hook call with nothing to select before an order is chosen.
+  // Built from both orders *and* messages, not orders alone: a customer with
+  // real SMS history but no order linked to their id (an order pointing at a
+  // stale/duplicate customer row, or simply no order placed yet) still has a
+  // real conversation to show, and listing by order alone hid it entirely.
+  const customersList: CustomerThread[] = useMemo(() => {
+    const byId = new Map<string, CustomerThread>();
+    for (const order of ordersList) {
+      const c = order.customers;
+      if (!c) continue;
+      const existing = byId.get(c.id);
+      if (existing) existing.orders.push(order);
+      else byId.set(c.id, { id: c.id, name: c.name, phone: c.phone, orders: [order] });
+    }
+    for (const m of allMessages ?? []) {
+      const c = m.customers;
+      if (!c || byId.has(c.id)) continue;
+      byId.set(c.id, { id: c.id, name: c.name, phone: c.phone, orders: [] });
+    }
+    for (const c of byId.values()) {
+      c.orders.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    }
+    return Array.from(byId.values());
+  }, [ordersList, allMessages]);
+
+  // May be undefined: an empty database shows an empty list, not sample data.
+  const activeCustomer =
+    customersList.find((c) => c.id === customerId) ?? customersList[0];
+  const activeCustomerId = activeCustomer?.id;
+  const activeOrder = activeCustomer?.orders[0];
+
+  // The real, persistent conversation: threaded by customer. Empty string is
+  // a harmless no-op query (no customer_id is ever ""), which keeps this a
+  // plain hook call with nothing to select before a conversation is chosen.
   const { data: realThread } = useQuery("thread", activeCustomerId ?? "");
 
   // Sent-but-not-yet-refetched messages, so a reply appears immediately
@@ -161,7 +210,12 @@ const StaffOrders = () => {
 
   const toChatMessage = (m: MessageView): ChatMessage => ({
     id: m.id,
-    sender: m.direction === "inbound" ? "customer" : "user",
+    sender:
+      m.direction === "inbound"
+        ? "customer"
+        : m.actor === "dara"
+          ? "dara"
+          : "operator",
     text: m.body,
     timestamp: m.createdAt
       ? new Date(m.createdAt).toLocaleTimeString([], {
@@ -173,24 +227,31 @@ const StaffOrders = () => {
     card: cardsById[m.id],
   });
 
-  const currentMessages: ChatMessage[] = !activeOrder
+  // The order-summary card is only meaningful when there is one -- a
+  // customer with real message history but no order yet (see customersList)
+  // still gets their conversation shown, just without that card up top.
+  const currentMessages: ChatMessage[] = !activeCustomer
     ? []
     : [
-        {
-          id: "default-1",
-          sender: "system",
-          text: `Order #${activeOrder.id} initiated`,
-          timestamp: "Just now",
-          card: {
-            type: "order_summary",
-            title: `Order #${activeOrder.id}`,
-            subtitle: `${activeOrder.packages?.length ?? 0} package(s)`,
-            amount: activeOrder.amountTotal ?? undefined,
-            badge: activeOrder.clearance ?? "Pending",
-            origin: activeOrder.orderFrom?.description ?? "Origin",
-            destination: activeOrder.orderTo?.description ?? "Destination",
-          },
-        },
+        ...(activeOrder
+          ? [
+              {
+                id: "default-1",
+                sender: "system" as const,
+                text: `Order #${activeOrder.id} initiated`,
+                timestamp: "Just now",
+                card: {
+                  type: "order_summary",
+                  title: `Order #${activeOrder.id}`,
+                  subtitle: `${activeOrder.packages?.length ?? 0} package(s)`,
+                  amount: activeOrder.amountTotal ?? undefined,
+                  badge: activeOrder.clearance ?? "Pending",
+                  origin: activeOrder.orderFrom?.description ?? "Origin",
+                  destination: activeOrder.orderTo?.description ?? "Destination",
+                },
+              },
+            ]
+          : []),
         ...(realThread ?? []).map(toChatMessage),
         ...pending,
       ];
@@ -198,17 +259,16 @@ const StaffOrders = () => {
   // Scroll to bottom of message list on updates
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [currentMessages.length, activeOrder?.id]);
+  }, [currentMessages.length, activeCustomerId]);
 
   // The chat is always on screen now (not behind a toggle), so focus moves
   // to the composer whenever the open conversation changes instead.
   useEffect(() => {
-    if (activeOrder) messageInputRef.current?.focus();
-  }, [activeOrder?.id]);
+    if (activeCustomer) messageInputRef.current?.focus();
+  }, [activeCustomerId]);
 
-  // Last message per customer, for the sidebar preview -- one tenant-wide
-  // query rather than one per order, since hooks can't run inside a loop.
-  const { data: allMessages } = useQuery("listMessages", 200);
+  // Last message per customer, for the sidebar preview (allMessages is
+  // fetched above, alongside customersList).
   const lastMessageByCustomer = useMemo(() => {
     const map = new Map<string, MessageView>();
     for (const m of allMessages ?? []) {
@@ -220,31 +280,31 @@ const StaffOrders = () => {
     return map;
   }, [allMessages]);
 
-  // Filter orders by search
-  const filteredOrders = ordersList.filter((order) => {
-    const custName = order.customers?.name?.toLowerCase() || "";
-    const idStr = order.id.toLowerCase();
-    const fromStr = order.orderFrom?.description?.toLowerCase() || "";
-    const toStr = order.orderTo?.description?.toLowerCase() || "";
+  // Filter customers by search -- matches their name/phone, or any of their
+  // orders' id/route.
+  const filteredCustomers = customersList.filter((customer) => {
     const query = searchQuery.toLowerCase();
-    return (
-      custName.includes(query) ||
-      idStr.includes(query) ||
-      fromStr.includes(query) ||
-      toStr.includes(query)
+    const custName = customer.name?.toLowerCase() || "";
+    const phone = customer.phone?.toLowerCase() || "";
+    const matchesOrder = customer.orders.some(
+      (order) =>
+        order.id.toLowerCase().includes(query) ||
+        (order.orderFrom?.description?.toLowerCase() || "").includes(query) ||
+        (order.orderTo?.description?.toLowerCase() || "").includes(query),
     );
+    return custName.includes(query) || phone.includes(query) || matchesOrder;
   });
 
   const handleSendMessage = (customText?: string, customCard?: ChatMessage["card"]) => {
-    const order = activeOrder;
-    if (!order) return;
+    const customer = activeCustomer;
+    if (!customer) return;
     const textToSend = customText !== undefined ? customText : inputText.trim();
     if (!textToSend && !customCard) return;
 
     const id = crypto.randomUUID();
     const newMessage: ChatMessage = {
       id,
-      sender: "user",
+      sender: "operator",
       text: textToSend,
       timestamp: new Date().toLocaleTimeString([], {
         hour: "2-digit",
@@ -262,16 +322,19 @@ const StaffOrders = () => {
 
     // An operator typing here is a human reply, not Dara's -- actor records
     // that distinction directly on the message rather than requiring a join
-    // against events to tell them apart later.
+    // against events to tell them apart later. customerId used to be
+    // omitted here entirely, which silently orphaned every operator-sent
+    // reply from the customer's thread (never showed up again after reload).
     getApi()
       .then((api) =>
         api.appendMessage({
           id,
+          customerId: customer.id,
           direction: "outbound",
           actor: "operator",
           body: textToSend,
           from: "SMTN Support",
-          to: order.customers?.name || "Customer",
+          to: customer.name || "Customer",
         }),
       )
       .catch((e: unknown) => console.log("message sync note:", e));
@@ -307,7 +370,7 @@ const StaffOrders = () => {
           whole screen and swaps out for the chat once a conversation opens. */}
       <div
         className={`${
-          orderId ? "hidden" : "flex"
+          customerId ? "hidden" : "flex"
         } lg:flex flex-col w-full lg:w-[380px] lg:shrink-0 h-full bg-white dark:bg-black lg:border-r border-gray-100 dark:border-neutral-800`}
       >
         {/* List header */}
@@ -318,14 +381,17 @@ const StaffOrders = () => {
                 Orders
               </span>
               <span className="bg-gray-100 dark:bg-neutral-800 text-black dark:text-white text-xs font-semibold px-2 py-0.5 rounded-full">
-                {ordersList.length}
+                {customersList.length}
               </span>
             </div>
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  const newOrdId = `ord-${Math.floor(10000 + Math.random() * 90000)}`;
-                  navigate(`/orders/${newOrdId}`);
+                  // No real "new customer" flow yet -- a customer only
+                  // exists once they've texted in or been imported with a
+                  // package. This just clears the open conversation; an id
+                  // that matches nothing falls back to customersList[0].
+                  navigate("/orders/new");
                 }}
                 title="New Order Conversation"
                 className="w-9 h-9 rounded-full flex items-center justify-center bg-black dark:bg-white text-white dark:text-black hover:opacity-80 transition-opacity cursor-pointer"
@@ -356,24 +422,23 @@ const StaffOrders = () => {
           </div>
         </div>
 
-        {/* Orders list */}
+        {/* Conversations list -- one row per customer */}
         <div className="flex-1 overflow-y-auto scrollbar-none w-full max-w-3xl mx-auto">
-          {filteredOrders.length === 0 ? (
+          {filteredCustomers.length === 0 ? (
             <div className="p-8 text-center text-gray-500 text-sm">
               No orders found matching "{searchQuery}"
             </div>
           ) : (
-            filteredOrders.map((order) => {
-              const lastReal = order.customers?.id
-                ? lastMessageByCustomer.get(order.customers.id)
-                : undefined;
+            filteredCustomers.map((customer) => {
+              const lastReal = lastMessageByCustomer.get(customer.id);
               const lastMsg = lastReal ? toChatMessage(lastReal) : undefined;
-              const isActive = order.id === activeOrder?.id;
+              const isActive = customer.id === activeCustomer?.id;
+              const latestOrder = customer.orders[0];
 
               return (
                 <div
-                  key={order.id}
-                  onClick={() => navigate(`/orders/${order.id}`)}
+                  key={customer.id}
+                  onClick={() => navigate(`/orders/${customer.id}`)}
                   className={`flex items-start gap-3 px-4 py-4 cursor-pointer transition-colors border-b border-gray-100 dark:border-neutral-800 hover:bg-gray-50 dark:hover:bg-neutral-900 ${
                     isActive ? "bg-gray-50 dark:bg-neutral-900" : ""
                   }`}
@@ -381,9 +446,9 @@ const StaffOrders = () => {
                   {/* iOS Avatar */}
                   <div className="relative shrink-0">
                     <div className="w-12 h-12 rounded-full bg-black dark:bg-white flex items-center justify-center text-white dark:text-black font-bold text-sm">
-                      {getInitials(order.customers?.name)}
+                      {getInitials(customer.name)}
                     </div>
-                    {order.clearance === "Cleared" && (
+                    {latestOrder?.clearance === "Cleared" && (
                       <span
                         style={{ backgroundColor: UBER_GREEN }}
                         className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 border-2 border-white dark:border-black rounded-full"
@@ -395,7 +460,7 @@ const StaffOrders = () => {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-1 mb-0.5">
                       <span className="font-semibold text-black dark:text-white text-sm truncate">
-                        {order.customers?.name}
+                        {customer.name}
                       </span>
                       <span className="text-[11px] text-gray-400 dark:text-neutral-500 shrink-0 font-medium">
                         {lastMsg?.timestamp || "Today"}
@@ -405,7 +470,7 @@ const StaffOrders = () => {
                     <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-neutral-400 mb-1">
 
                       <span className="truncate">
-                        {order.orderTo?.description || "Express Freight"}
+                        {latestOrder?.orderTo?.description || "Express Freight"}
                       </span>
                     </div>
 
@@ -426,10 +491,10 @@ const StaffOrders = () => {
           right, popped open from the info button in the top bar. */}
       <div
         className={`${
-          orderId ? "flex" : "hidden"
+          customerId ? "flex" : "hidden"
         } lg:flex flex-1 flex-col h-full min-w-0 bg-white dark:bg-black relative`}
       >
-        {!activeOrder ? (
+        {!activeCustomer ? (
           <div className="hidden lg:flex flex-1 items-center justify-center text-sm text-gray-400 dark:text-neutral-600">
             Select a conversation to start chatting
           </div>
@@ -445,14 +510,14 @@ const StaffOrders = () => {
                 <IconChevronLeft className="w-6 h-6" />
               </button>
               <div className="w-9 h-9 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center font-bold text-xs shrink-0">
-                {getInitials(activeOrder?.customers?.name)}
+                {getInitials(activeCustomer?.name)}
               </div>
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-black dark:text-white text-sm truncate">
-                  {activeOrder?.customers?.name || "Customer"}
+                  {activeCustomer?.name || "Customer"}
                 </p>
                 <p className="text-xs text-gray-500 dark:text-neutral-400 truncate">
-                  {headline.title}
+                  {activeOrder ? headline.title : activeCustomer?.phone || "No orders yet"}
                 </p>
               </div>
               <button
@@ -468,13 +533,20 @@ const StaffOrders = () => {
               </button>
             </div>
 
-            {/* Message thread -- Claude-style: the customer's messages are
-                plain text with an avatar, the operator's own are a bubble. */}
+            {/* Message thread -- Claude-style: this is fundamentally the
+                customer <-> Dara conversation, laid out exactly like
+                Claude's own UI. The customer's texts are the "prompt"
+                bubble, right-aligned; Dara's replies are the "response",
+                plain text on the left with an avatar + name. An operator
+                stepping in manually renders in that same assistant slot
+                (it's still SMTN's side of the thread) but labeled
+                "Operator" instead, so staff can tell a human intervened. */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 md:px-6 py-6 scrollbar-thin">
               <div className="w-full max-w-3xl mx-auto flex flex-col gap-5">
                 {currentMessages.map((msg) => {
-                  const isUser = msg.sender === "user";
+                  const isCustomer = msg.sender === "customer";
                   const isSystem = msg.sender === "system";
+                  const isDara = msg.sender === "dara";
 
                   if (isSystem && msg.card) {
                     return (
@@ -531,37 +603,56 @@ const StaffOrders = () => {
                     );
                   }
 
-                  if (isUser) {
-                    // The operator's own messages: a bubble, right-aligned --
-                    // same "you" convention iMessage and Claude both use.
+                  if (isCustomer) {
+                    // The customer's texts: the "prompt" bubble, right-
+                    // aligned -- same slot the user's own messages occupy in
+                    // Claude's UI.
                     return (
                       <div key={msg.id} className="flex flex-col items-end max-w-[85%] md:max-w-[75%] ml-auto">
                         <div className="relative px-4 py-2.5 text-[14px] leading-relaxed bg-black text-white dark:bg-white dark:text-black rounded-2xl rounded-br-md">
                           <p className="whitespace-pre-wrap break-words">{msg.text}</p>
                         </div>
-                        <div className="flex items-center gap-1 mt-1 text-[10px] text-gray-400 dark:text-neutral-500 px-1">
-                          <span>{msg.timestamp}</span>
-                          <span style={{ color: UBER_GREEN }} className="flex items-center gap-0.5 font-medium">
-                            • Delivered
-                          </span>
-                        </div>
+                        <span className="text-[10px] text-gray-400 dark:text-neutral-500 mt-1 px-1">
+                          {msg.timestamp}
+                        </span>
                       </div>
                     );
                   }
 
-                  // The customer's messages: plain text with an avatar, no
-                  // bubble -- Claude's convention for "the other party."
+                  // Dara's replies (and an operator's manual ones): plain
+                  // text with an avatar + name, no bubble -- Claude's
+                  // convention for the assistant's turn. The avatar/name
+                  // pair is what tells the two apart.
                   return (
                     <div key={msg.id} className="flex items-start gap-3 max-w-[90%] md:max-w-[80%]">
-                      <div className="w-7 h-7 rounded-full bg-gray-200 dark:bg-neutral-800 text-black dark:text-white flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">
-                        {getInitials(activeOrder?.customers?.name)}
+                      <div
+                        className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
+                          isDara
+                            ? "text-white"
+                            : "bg-gray-200 dark:bg-neutral-800 text-black dark:text-white"
+                        }`}
+                        style={isDara ? { backgroundColor: UBER_GREEN } : undefined}
+                      >
+                        {isDara ? (
+                          <IconSparkles className="w-3.5 h-3.5" />
+                        ) : (
+                          <IconHeadset className="w-3.5 h-3.5" />
+                        )}
                       </div>
                       <div className="flex flex-col items-start min-w-0">
+                        <span className="text-[11px] font-semibold text-gray-500 dark:text-neutral-400 mb-0.5">
+                          {isDara ? "Dara" : "Operator"}
+                        </span>
                         <p className="text-[14px] leading-relaxed text-black dark:text-white whitespace-pre-wrap break-words">
                           {msg.text}
                         </p>
-                        <span className="text-[10px] text-gray-400 dark:text-neutral-500 mt-1">
-                          {msg.timestamp}
+                        <span className="flex items-center gap-1 text-[10px] text-gray-400 dark:text-neutral-500 mt-1">
+                          <span>{msg.timestamp}</span>
+                          {msg.status === "delivered" && (
+                            <span style={{ color: UBER_GREEN }} className="font-medium">
+                              • Delivered
+                            </span>
+                          )}
                         </span>
                       </div>
                     </div>
@@ -661,8 +752,10 @@ const StaffOrders = () => {
 
         {/* ==================== RIGHT: DETAILS DRAWER ====================
             Pops out from the right on top of everything -- the ETA/route/
-            packages/share content that used to be the whole main pane. */}
-        {activeOrder && (
+            packages/share content that used to be the whole main pane. Opens
+            for any active conversation; the order-specific sections below
+            just don't render for a customer with no orders yet. */}
+        {activeCustomer && (
           <>
             {showDetails && (
               <div
@@ -688,118 +781,132 @@ const StaffOrders = () => {
               </div>
 
               <div className="flex-1 overflow-y-auto">
-                <div className="relative h-36 shrink-0">
-                  <RouteMap />
-                </div>
+                {activeOrder ? (
+                  <>
+                    <div className="relative h-36 shrink-0">
+                      <RouteMap />
+                    </div>
 
-                {/* ETA headline & progress */}
-                <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800">
-                  <h2 className="text-xl font-bold tracking-tight text-black dark:text-white">
-                    {headline.title}
-                  </h2>
-                  <p className="text-sm text-gray-500 dark:text-neutral-400 mt-1">
-                    {headline.sub}
-                  </p>
-                  <div className="flex items-center gap-1 mt-4 mb-2">
-                    {TRACK_STEPS.map((stepLabel, i) => (
-                      <div
-                        key={stepLabel}
-                        className={`h-1.5 flex-1 rounded-full ${
-                          i < trackStep ? "bg-black dark:bg-white" : "bg-gray-200 dark:bg-neutral-800"
-                        }`}
-                      />
-                    ))}
+                    {/* ETA headline & progress */}
+                    <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800">
+                      <h2 className="text-xl font-bold tracking-tight text-black dark:text-white">
+                        {headline.title}
+                      </h2>
+                      <p className="text-sm text-gray-500 dark:text-neutral-400 mt-1">
+                        {headline.sub}
+                      </p>
+                      <div className="flex items-center gap-1 mt-4 mb-2">
+                        {TRACK_STEPS.map((stepLabel, i) => (
+                          <div
+                            key={stepLabel}
+                            className={`h-1.5 flex-1 rounded-full ${
+                              i < trackStep ? "bg-black dark:bg-white" : "bg-gray-200 dark:bg-neutral-800"
+                            }`}
+                          />
+                        ))}
+                      </div>
+                      <p className="text-xs font-medium text-gray-500 dark:text-neutral-400">
+                        {TRACK_STEPS[Math.min(trackStep, TRACK_STEPS.length) - 1]}
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800">
+                    <p className="text-sm text-gray-500 dark:text-neutral-400">
+                      No orders yet for this customer.
+                    </p>
                   </div>
-                  <p className="text-xs font-medium text-gray-500 dark:text-neutral-400">
-                    {TRACK_STEPS[Math.min(trackStep, TRACK_STEPS.length) - 1]}
-                  </p>
-                </div>
+                )}
 
                 {/* Customer */}
                 <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800 flex items-center gap-4">
                   <div className="w-12 h-12 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center font-bold text-sm shrink-0">
-                    {getInitials(activeOrder?.customers?.name)}
+                    {getInitials(activeCustomer?.name)}
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="font-semibold text-black dark:text-white text-[15px] truncate">
-                      {activeOrder?.customers?.name || "Customer"}
+                      {activeCustomer?.name || "Customer"}
                     </p>
                     <p className="text-xs text-gray-500 dark:text-neutral-400 truncate mt-0.5">
-                      {activeOrder?.customers?.phone || "+1 (800) SMTN-CARGO"}
+                      {activeCustomer?.phone || "+1 (800) SMTN-CARGO"}
                     </p>
                   </div>
                 </div>
 
-                {/* Route */}
-                <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800 flex gap-4">
-                  <div className="flex flex-col items-center pt-1.5 shrink-0">
-                    <span className="w-2.5 h-2.5 bg-black dark:bg-white" />
-                    <span className="flex-1 w-px border-l border-dashed border-gray-300 dark:border-neutral-700 my-2" />
-                    <span className="w-2.5 h-2.5 rounded-full border-2 border-black dark:border-white" />
-                  </div>
-                  <div className="flex-1 min-w-0 flex flex-col gap-6">
-                    <div className="min-w-0">
-                      <p className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500 mb-1.5">
-                        Pickup
-                      </p>
-                      <p className="text-sm text-black dark:text-white truncate">
-                        {activeOrder?.orderFrom?.description || "Origin"}
-                      </p>
+                {activeOrder && (
+                  <>
+                    {/* Route */}
+                    <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800 flex gap-4">
+                      <div className="flex flex-col items-center pt-1.5 shrink-0">
+                        <span className="w-2.5 h-2.5 bg-black dark:bg-white" />
+                        <span className="flex-1 w-px border-l border-dashed border-gray-300 dark:border-neutral-700 my-2" />
+                        <span className="w-2.5 h-2.5 rounded-full border-2 border-black dark:border-white" />
+                      </div>
+                      <div className="flex-1 min-w-0 flex flex-col gap-6">
+                        <div className="min-w-0">
+                          <p className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500 mb-1.5">
+                            Pickup
+                          </p>
+                          <p className="text-sm text-black dark:text-white truncate">
+                            {activeOrder?.orderFrom?.description || "Origin"}
+                          </p>
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500 mb-1.5">
+                            Dropoff
+                          </p>
+                          <p className="text-sm text-black dark:text-white truncate">
+                            {activeOrder?.orderTo?.description || "Destination"}
+                          </p>
+                        </div>
+                      </div>
                     </div>
-                    <div className="min-w-0">
-                      <p className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500 mb-1.5">
-                        Dropoff
-                      </p>
-                      <p className="text-sm text-black dark:text-white truncate">
-                        {activeOrder?.orderTo?.description || "Destination"}
-                      </p>
+
+                    {/* Packages & total */}
+                    <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800 flex flex-col gap-4">
+                      <div className="flex items-baseline justify-between gap-4">
+                        <span className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500">
+                          Packages
+                        </span>
+                        <span className="text-sm text-black dark:text-white">
+                          {packageCount}
+                          {packageWeight > 0 ? ` · ${packageWeight} kg` : ""}
+                        </span>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-4">
+                        <span className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500">
+                          Total
+                        </span>
+                        <span className="text-sm font-semibold text-black dark:text-white">
+                          ${activeOrder?.amountTotal || 200}.00 CAD
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                </div>
 
-                {/* Packages & total */}
-                <div className="px-5 py-5 border-b border-gray-100 dark:border-neutral-800 flex flex-col gap-4">
-                  <div className="flex items-baseline justify-between gap-4">
-                    <span className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500">
-                      Packages
-                    </span>
-                    <span className="text-sm text-black dark:text-white">
-                      {packageCount}
-                      {packageWeight > 0 ? ` · ${packageWeight} kg` : ""}
-                    </span>
-                  </div>
-                  <div className="flex items-baseline justify-between gap-4">
-                    <span className="text-[10px] uppercase tracking-[0.15em] text-gray-400 dark:text-neutral-500">
-                      Total
-                    </span>
-                    <span className="text-sm font-semibold text-black dark:text-white">
-                      ${activeOrder?.amountTotal || 200}.00 CAD
-                    </span>
-                  </div>
-                </div>
-
-                {/* Share */}
-                <div className="px-5 py-5">
-                  <button
-                    onClick={async () => {
-                      if (!activeOrder) return;
-                      try {
-                        const api = await getApi();
-                        const { token } = await api.createTrackingLink(activeOrder.id);
-                        const url = `${window.location.origin}/orders/${activeOrder.id}?t=${token}`;
-                        await navigator.clipboard.writeText(url);
-                        setLinkCopied(true);
-                        setTimeout(() => setLinkCopied(false), 2000);
-                      } catch (e) {
-                        console.error("Could not create tracking link:", e);
-                      }
-                    }}
-                    className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-100 dark:bg-neutral-800 hover:bg-gray-200 dark:hover:bg-neutral-700 text-black dark:text-white transition-colors cursor-pointer text-sm font-medium"
-                  >
-                    <IconShare className="w-4 h-4" />
-                    {linkCopied ? "Link copied!" : "Share tracking link"}
-                  </button>
-                </div>
+                    {/* Share */}
+                    <div className="px-5 py-5">
+                      <button
+                        onClick={async () => {
+                          if (!activeOrder) return;
+                          try {
+                            const api = await getApi();
+                            const { token } = await api.createTrackingLink(activeOrder.id);
+                            const url = `${window.location.origin}/orders/${activeOrder.id}?t=${token}`;
+                            await navigator.clipboard.writeText(url);
+                            setLinkCopied(true);
+                            setTimeout(() => setLinkCopied(false), 2000);
+                          } catch (e) {
+                            console.error("Could not create tracking link:", e);
+                          }
+                        }}
+                        className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-100 dark:bg-neutral-800 hover:bg-gray-200 dark:hover:bg-neutral-700 text-black dark:text-white transition-colors cursor-pointer text-sm font-medium"
+                      >
+                        <IconShare className="w-4 h-4" />
+                        {linkCopied ? "Link copied!" : "Share tracking link"}
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </>
@@ -1008,12 +1115,15 @@ const PublicOrderTracking = ({
 // auth check at all. Its absence means staff, gated the same way /dashboard
 // is.
 export const Orders = () => {
-  const { orderId } = useParams();
+  // Same URL slot serves two different id types depending on the branch
+  // below: an order id for a public tracking link, a customer id for the
+  // staff view (see StaffOrders).
+  const { id } = useParams();
   const [searchParams] = useSearchParams();
   const token = searchParams.get("t");
 
-  if (orderId && token) {
-    return <PublicOrderTracking orderId={orderId} token={token} />;
+  if (id && token) {
+    return <PublicOrderTracking orderId={id} token={token} />;
   }
 
   return (

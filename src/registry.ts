@@ -1,4 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
+import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
+import { eq } from "drizzle-orm";
+import { numbers, orgs } from "./db/schema";
 import type { Env } from "./rpc";
 
 // A single object holding the tenant index. Everything else in the system is
@@ -15,8 +18,11 @@ export interface OrgRow {
 }
 
 export class RegistryDO extends DurableObject<Env> {
+  readonly db: DrizzleSqliteDODatabase;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.db = drizzle(ctx.storage);
     ctx.blockConcurrencyWhile(async () => this.#migrate());
   }
 
@@ -47,49 +53,38 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   async registerOrg(orgId: string, name: string): Promise<void> {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO orgs (org_id, name, created_at) VALUES (?, ?, ?)
-       ON CONFLICT(org_id) DO UPDATE SET name = excluded.name`,
-      orgId,
-      name,
-      Date.now(),
-    );
+    await this.db
+      .insert(orgs)
+      .values({ orgId, name, createdAt: Date.now() })
+      .onConflictDoUpdate({ target: orgs.orgId, set: { name } });
   }
 
   async listOrgs(): Promise<OrgRow[]> {
-    return this.ctx.storage.sql
-      .exec<Record<string, any>>("SELECT * FROM orgs ORDER BY created_at")
-      .toArray()
-      .map((r) => ({ orgId: r.org_id, name: r.name, createdAt: r.created_at }));
+    return (await this.db.select().from(orgs).orderBy(orgs.createdAt))
+      .map((r) => ({ orgId: r.orgId, name: r.name, createdAt: r.createdAt }));
   }
 
   // A number routes to exactly one org. Claiming one already held by another
   // org fails loudly rather than silently redirecting somebody's customers.
   async claimNumber(phone: string, orgId: string): Promise<void> {
-    const held = this.ctx.storage.sql
-      .exec<{ org_id: string }>(
-        "SELECT org_id FROM numbers WHERE phone = ?",
-        phone,
-      )
-      .toArray()[0];
-    if (held && held.org_id !== orgId) {
+    const [held] = await this.db
+      .select()
+      .from(numbers)
+      .where(eq(numbers.phone, phone))
+      .limit(1);
+    if (held && held.orgId !== orgId) {
       throw new Error(`${phone} is already claimed by another organization`);
     }
-    this.ctx.storage.sql.exec(
-      `INSERT INTO numbers (phone, org_id) VALUES (?, ?)
-       ON CONFLICT(phone) DO UPDATE SET org_id = excluded.org_id`,
-      phone,
-      orgId,
-    );
+    await this.db.insert(numbers).values({ phone, orgId })
+      .onConflictDoUpdate({ target: numbers.phone, set: { orgId } });
   }
 
   async orgForNumber(phone: string): Promise<string | null> {
-    const row = this.ctx.storage.sql
-      .exec<{ org_id: string }>(
-        "SELECT org_id FROM numbers WHERE phone = ?",
-        phone,
-      )
-      .toArray()[0];
-    return row?.org_id ?? null;
+    const [row] = await this.db
+      .select()
+      .from(numbers)
+      .where(eq(numbers.phone, phone))
+      .limit(1);
+    return row?.orgId ?? null;
   }
 }

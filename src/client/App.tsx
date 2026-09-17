@@ -8,7 +8,6 @@ import { RequireTenant } from "./onboarding";
 import Index from "./routes/_index";
 import Dashboard from "./routes/dashboard";
 import Track from "./routes/track";
-import Activity from "./routes/activity";
 import { Shipments, Shipment } from "./routes/shipments";
 import Profile from "./routes/profile";
 
@@ -55,13 +54,20 @@ const Layout = () => {
               </RequireTenant>
             }
           >
-            <Route index element={<Activity />} />
+            {/* Orders is the main view -- activity.tsx (a duplicate of this
+                same component) is gone. Orders also stays mounted at the
+                top-level /orders paths below: PublicOrderTracking (reached
+                via a ?t= tracking token, no account) can't sit behind
+                RequireTenant the way this nested route is. */}
+            <Route index element={<Orders />} />
             <Route path="shipments" element={<Shipments />}>
               <Route path=":shipmentId" element={<Shipment />} />
             </Route>
           </Route>
           <Route path="orders" element={<Orders />} />
-          <Route path="orders/:orderId" element={<Orders />} />
+          {/* Order id for a public tracking link (?t=...), customer id for
+              the staff view -- see the Orders component itself. */}
+          <Route path="orders/:id" element={<Orders />} />
           <Route path="track/:orderId" element={<FixedTheme><Track /></FixedTheme>} />
           <Route path="profile" element={<FixedTheme><Profile /></FixedTheme>} />
           <Route path="*" element={<p>Not Found</p>} />

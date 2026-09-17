@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "db:generate": "drizzle-kit generate",
     "test": "vitest run",
     "deploy": "vite build && wrangler deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
@@ -25,6 +26,7 @@
     "agents": "^0.20.1",
     "ai": "^7.0.66",
     "capnweb": "^0.2.0",
+    "drizzle-orm": "1.0.0-rc.4",
     "fflate": "^0.8.3",
     "hono": "^4.12.23",
     "pnpm": "^11.7.0",
@@ -47,6 +49,7 @@
     "@cloudflare/vitest-pool-workers": "^0.21.1",
     "@tailwindcss/vite": "^4.3.1",
     "@vitejs/plugin-react": "^6.0.2",
+    "drizzle-kit": "1.0.0-rc.4",
     "tailwindcss": "^4.3.1",
     "vitest": "4.1.10",
     "wrangler": "^4.100.0"

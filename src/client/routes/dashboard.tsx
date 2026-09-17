@@ -24,10 +24,13 @@ export const Dashboard = () => {
           />
         </div>
         <div className="flex items-center gap-1">
+          {/* Orders is the dashboard's index route now, so this is a way
+              back to it from elsewhere in the dashboard (shipments), not a
+              separate destination. */}
           <Button
             variant="quiet"
             aria-label="Orders"
-            onPress={() => navigate("/orders")}
+            onPress={() => navigate("/dashboard")}
           >
             <IconInbox className="h-5 w-5" />
           </Button>

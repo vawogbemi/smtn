@@ -6,6 +6,15 @@ import {
 import { createCompactFunction } from "agents/experimental/memory/utils";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText } from "ai";
+import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
+import { and, desc, eq, isNull } from "drizzle-orm";
+import {
+  customers,
+  events,
+  messages,
+  shipments,
+  tenant,
+} from "./db/schema";
 import type { Env } from "./rpc";
 
 // One Durable Object per freight forwarder. Tenancy is structural: a tenant's
@@ -263,8 +272,11 @@ function toSessionMessage(m: MessageInput): SessionMessage {
 }
 
 export class TenantDO extends DurableObject<Env> {
+  readonly db: DrizzleSqliteDODatabase;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.db = drizzle(ctx.storage);
     // Migrations run once per object, on wake, before any request is served.
     ctx.blockConcurrencyWhile(async () => this.#migrate());
   }
@@ -472,34 +484,32 @@ export class TenantDO extends DurableObject<Env> {
     name: string,
   ): Promise<TenantSettings> {
     if (!orgId) throw new Error("orgId is required");
-    this.ctx.storage.sql.exec(
-      `INSERT INTO tenant (id, org_id, name, created_at) VALUES (1, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
-      orgId,
-      name || "Untitled",
-      Date.now(),
-    );
+    await this.db
+      .insert(tenant)
+      .values({ id: 1, orgId, name: name || "Untitled", createdAt: Date.now() })
+      .onConflictDoUpdate({ target: tenant.id, set: { name: name || "Untitled" } });
     return this.settings();
   }
 
   async settings(): Promise<TenantSettings> {
-    const rows = this.ctx.storage.sql
-      .exec<Record<string, any>>("SELECT * FROM tenant WHERE id = 1")
-      .toArray();
-    const row = rows[0];
+    const [row] = await this.db
+      .select()
+      .from(tenant)
+      .where(eq(tenant.id, 1))
+      .limit(1);
     if (!row) throw new Error("Tenant has not been initialized");
     return {
-      orgId: row.org_id,
+      orgId: row.orgId,
       name: row.name,
-      twilioNumber: row.twilio_number,
+      twilioNumber: row.twilioNumber,
       origin: row.origin
-        ? { description: row.origin, placeId: row.origin_place_id }
+        ? { description: row.origin, placeId: row.originPlaceId }
         : null,
       destination: row.destination
-        ? { description: row.destination, placeId: row.destination_place_id }
+        ? { description: row.destination, placeId: row.destinationPlaceId }
         : null,
       markup: row.markup,
-      createdAt: row.created_at,
+      createdAt: row.createdAt,
     };
   }
 
@@ -510,33 +520,22 @@ export class TenantDO extends DurableObject<Env> {
     destination?: PlaceView | null;
     markup?: number;
   }): Promise<TenantSettings> {
-    const sql = this.ctx.storage.sql;
-    if (patch.name !== undefined) {
-      sql.exec("UPDATE tenant SET name = ? WHERE id = 1", patch.name);
-    }
-    if (patch.twilioNumber !== undefined) {
-      sql.exec(
-        "UPDATE tenant SET twilio_number = ? WHERE id = 1",
-        patch.twilioNumber,
-      );
-    }
-    if (patch.origin !== undefined) {
-      sql.exec(
-        "UPDATE tenant SET origin = ?, origin_place_id = ? WHERE id = 1",
-        patch.origin?.description ?? null,
-        patch.origin?.placeId ?? null,
-      );
-    }
-    if (patch.destination !== undefined) {
-      sql.exec(
-        "UPDATE tenant SET destination = ?, destination_place_id = ? WHERE id = 1",
-        patch.destination?.description ?? null,
-        patch.destination?.placeId ?? null,
-      );
-    }
-    if (patch.markup !== undefined) {
-      sql.exec("UPDATE tenant SET markup = ? WHERE id = 1", patch.markup);
-    }
+    await this.db
+      .update(tenant)
+      .set({
+        ...(patch.name !== undefined && { name: patch.name }),
+        ...(patch.twilioNumber !== undefined && { twilioNumber: patch.twilioNumber }),
+        ...(patch.origin !== undefined && {
+          origin: patch.origin?.description ?? null,
+          originPlaceId: patch.origin?.placeId ?? null,
+        }),
+        ...(patch.destination !== undefined && {
+          destination: patch.destination?.description ?? null,
+          destinationPlaceId: patch.destination?.placeId ?? null,
+        }),
+        ...(patch.markup !== undefined && { markup: patch.markup }),
+      })
+      .where(eq(tenant.id, 1));
     this.#broadcast({ type: "invalidate", scope: "settings" });
     return this.settings();
   }
@@ -662,34 +661,28 @@ export class TenantDO extends DurableObject<Env> {
   }
 
   async listShipments(): Promise<ShipmentView[]> {
-    const rows = this.ctx.storage.sql
-      .exec<Record<string, any>>(
-        "SELECT * FROM shipments ORDER BY created_at DESC",
-      )
-      .toArray();
+    const rows = await this.db.select().from(shipments).orderBy(desc(shipments.createdAt));
     return rows.map((r) => ({
       id: r.id,
       title: r.title,
       status: r.status,
-      createdAt: r.created_at,
+      createdAt: r.createdAt,
       orders: [],
     }));
   }
 
   async getShipment(shipmentId: string): Promise<ShipmentView | null> {
-    const rows = this.ctx.storage.sql
-      .exec<Record<string, any>>(
-        "SELECT * FROM shipments WHERE id = ?",
-        shipmentId,
-      )
-      .toArray();
-    const shipment = rows[0];
+    const [shipment] = await this.db
+      .select()
+      .from(shipments)
+      .where(eq(shipments.id, shipmentId))
+      .limit(1);
     if (!shipment) return null;
     return {
       id: shipment.id,
       title: shipment.title,
       status: shipment.status,
-      createdAt: shipment.created_at,
+      createdAt: shipment.createdAt,
       orders: this.#orders(
         "WHERE o.shipment_id = ? ORDER BY o.created_at DESC",
         shipmentId,
@@ -698,13 +691,11 @@ export class TenantDO extends DurableObject<Env> {
   }
 
   async getCustomerProfile(customerId: string): Promise<CustomerProfileView | null> {
-    const rows = this.ctx.storage.sql
-      .exec<Record<string, any>>(
-        "SELECT * FROM customers WHERE id = ?",
-        customerId,
-      )
-      .toArray();
-    const row = rows[0];
+    const [row] = await this.db
+      .select()
+      .from(customers)
+      .where(eq(customers.id, customerId))
+      .limit(1);
     if (!row) return null;
     return {
       id: row.id,
@@ -712,9 +703,9 @@ export class TenantDO extends DurableObject<Env> {
       phone: row.phone,
       email: row.email,
       address: row.address
-        ? { description: row.address, placeId: row.address_place_id }
+        ? { description: row.address, placeId: row.addressPlaceId }
         : null,
-      onboardedAt: row.onboarded_at,
+      onboardedAt: row.onboardedAt,
     };
   }
 
@@ -746,22 +737,20 @@ export class TenantDO extends DurableObject<Env> {
 
   async createShipment(title: string): Promise<string> {
     const shipmentId = crypto.randomUUID();
-    this.ctx.storage.sql.exec(
-      "INSERT INTO shipments (id, title, created_at) VALUES (?, ?, ?)",
-      shipmentId,
+    await this.db.insert(shipments).values({
+      id: shipmentId,
       title,
-      Date.now(),
-    );
+      createdAt: Date.now(),
+    });
     this.#broadcast({ type: "invalidate", scope: "shipments" });
     return shipmentId;
   }
 
   async updateShipmentTitle(shipmentId: string, title: string) {
-    this.ctx.storage.sql.exec(
-      "UPDATE shipments SET title = ? WHERE id = ?",
-      title,
-      shipmentId,
-    );
+    await this.db
+      .update(shipments)
+      .set({ title })
+      .where(eq(shipments.id, shipmentId));
     this.#broadcast({ type: "invalidate", scope: "shipments" });
   }
 
@@ -985,27 +974,24 @@ export class TenantDO extends DurableObject<Env> {
   // -- writes --------------------------------------------------------------
 
   async upsertCustomer(phone: string, name?: string | null): Promise<string> {
-    const existing = this.ctx.storage.sql
-      .exec<{ id: string }>("SELECT id FROM customers WHERE phone = ?", phone)
-      .toArray();
-    if (existing.length > 0) {
+    const [existing] = await this.db
+      .select()
+      .from(customers)
+      .where(eq(customers.phone, phone))
+      .limit(1);
+    if (existing) {
       if (name) {
-        this.ctx.storage.sql.exec(
-          "UPDATE customers SET name = COALESCE(name, ?) WHERE id = ?",
-          name,
-          existing[0].id,
-        );
+        await this.db
+          .update(customers)
+          .set({ name })
+          .where(and(eq(customers.id, existing.id), isNull(customers.name)));
       }
-      return existing[0].id;
+      return existing.id;
     }
     const id = crypto.randomUUID();
-    this.ctx.storage.sql.exec(
-      "INSERT INTO customers (id, name, phone, created_at) VALUES (?, ?, ?, ?)",
-      id,
-      name ?? null,
-      phone,
-      Date.now(),
-    );
+    await this.db
+      .insert(customers)
+      .values({ id, name: name ?? null, phone, createdAt: Date.now() });
     return id;
   }
 
@@ -1013,25 +999,20 @@ export class TenantDO extends DurableObject<Env> {
   // and the caller uses this to avoid replying twice.
   async recordMessage(m: MessageInput): Promise<boolean> {
     if (m.sid) {
-      const seen = this.ctx.storage.sql
-        .exec("SELECT 1 FROM messages WHERE sid = ?", m.sid)
-        .toArray();
-      if (seen.length > 0) return false;
+      const [seen] = await this.db
+        .select({ id: messages.id })
+        .from(messages)
+        .where(eq(messages.sid, m.sid))
+        .limit(1);
+      if (seen) return false;
     }
-    this.ctx.storage.sql.exec(
-      `INSERT INTO messages (id, customer_id, sid, direction, body, from_addr, to_addr, actor, channel, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      m.id,
-      m.customerId ?? null,
-      m.sid ?? null,
-      m.direction,
-      m.body,
-      m.from,
-      m.to,
-      m.actor,
-      m.channel ?? "sms",
-      Date.now(),
-    );
+    await this.db.insert(messages).values({
+      id: m.id,
+      customerId: m.customerId ?? null,
+      sid: m.sid ?? null,
+      direction: m.direction, body: m.body, from: m.from, to: m.to,
+      actor: m.actor, channel: m.channel ?? "sms", createdAt: Date.now(),
+    });
     // Async now (Session's appendMessage wraps the auto-compaction check),
     // so this is no longer in the same transaction as the insert above --
     // an accepted tradeoff for getting compaction. messages is already
@@ -1161,11 +1142,10 @@ export class TenantDO extends DurableObject<Env> {
   }
 
   async markHandled(eventId: number) {
-    this.ctx.storage.sql.exec(
-      "UPDATE events SET handled_at = ? WHERE id = ? AND handled_at IS NULL",
-      Date.now(),
-      eventId,
-    );
+    await this.db
+      .update(events)
+      .set({ handledAt: Date.now() })
+      .where(and(eq(events.id, eventId), isNull(events.handledAt)));
     this.#broadcast({ type: "invalidate", scope: "inbox" });
   }
 

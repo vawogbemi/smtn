@@ -295,6 +295,66 @@ async function run(
   });
 }
 
+// Occasionally the model emits its intended tool call as raw, unparsed text
+// instead of a real structured tool call through the provider -- e.g.
+// `{"name":"codemode","parameters":{...}}` or a stray `<tool_call>` /
+// `<arg_value>` fragment from the chat template leaking through. This is a
+// model/provider hiccup, not something under this code's control, but
+// sending it verbatim as a customer's SMS reply (or showing it to an
+// operator as Dara's answer) would be worse than no reply at all -- so it's
+// never treated as a real answer.
+function looksLikeLeakedToolCall(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/<\/?tool_call>/i.test(t)) return true;
+  if (/<\/?arg_value>/i.test(t)) return true;
+  if (t.startsWith("{") && /"name"\s*:\s*"codemode"/.test(t)) return true;
+  return false;
+}
+
+// The model usually closes with its own text turn, but createProfileLink
+// asks it to return the finished reply directly from the script instead of
+// retyping an exact url in a separate turn -- when that happens, result.text
+// is empty and the actual reply is the last tool's string result. Prefer the
+// model's own text when it wrote one.
+function extractReply(result: Awaited<ReturnType<typeof run>>): string | null {
+  const lastResult = result.toolResults.at(-1)?.output;
+  const lastToolText =
+    lastResult && typeof lastResult === "object" && "result" in lastResult &&
+      typeof lastResult.result === "string"
+      ? lastResult.result
+      : null;
+  const reply = (result.text.trim() || lastToolText || "").trim().slice(0, 450);
+  return reply || null;
+}
+
+// Runs once, and again if that attempt's reply looks like a leaked, unparsed
+// tool call -- a second attempt usually gets a clean structured call. Only
+// gives up after both attempts come back looking leaked.
+async function runWithRetry(
+  session: Session,
+  system: string,
+  input: { prompt: string } | { messages: SessionMessageView[] },
+  maxSteps: number,
+): Promise<{ reply: string | null; steps: number; leaked: boolean }> {
+  const first = await run(session, system, input, maxSteps);
+  const firstReply = extractReply(first);
+  let steps = first.steps.length;
+
+  if (!firstReply || !looksLikeLeakedToolCall(firstReply)) {
+    return { reply: firstReply, steps, leaked: false };
+  }
+
+  const retry = await run(session, system, input, maxSteps);
+  const retryReply = extractReply(retry);
+  steps += retry.steps.length;
+
+  if (retryReply && looksLikeLeakedToolCall(retryReply)) {
+    return { reply: null, steps, leaked: true };
+  }
+  return { reply: retryReply, steps, leaked: false };
+}
+
 export async function dara(
   env: Env,
   ctx: ExecutionContext,
@@ -302,13 +362,20 @@ export async function dara(
   task: string,
 ): Promise<{ ok: true; text: string; steps: number } | { ok: false; error: string }> {
   try {
-    const result = await run(
+    const { reply, steps, leaked } = await runWithRetry(
       { env, ctx, orgId, canSend: true, canWrite: true },
       SYSTEM_INSTRUCTIONS,
       { prompt: task },
       4,
     );
-    return { ok: true, text: result.text, steps: result.steps.length };
+    if (leaked) {
+      return {
+        ok: false,
+        error:
+          "Dara returned an unparsed tool call instead of a real reply, twice in a row -- try again.",
+      };
+    }
+    return { ok: true, text: reply ?? "", steps };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -336,25 +403,22 @@ export async function daraSms(
     const system = memory
       ? `${SMS_INSTRUCTIONS}\n\nWhat you've noted about this customer before: ${memory}`
       : SMS_INSTRUCTIONS;
-    const result = await run(
+    const { reply, steps, leaked } = await runWithRetry(
       { env, ctx, orgId, canSend: false, canWrite: false, customerId },
       system,
       { messages },
       4,
     );
-    // The model usually closes with its own text turn, but createProfileLink
-    // asks it to return the finished reply directly from the script instead
-    // of retyping an exact url in a separate turn -- when that happens,
-    // result.text is empty and the actual reply is the last tool's string
-    // result. Prefer the model's own text when it wrote one.
-    const lastResult = result.toolResults.at(-1)?.output;
-    const lastToolText =
-      lastResult && typeof lastResult === "object" && "result" in lastResult &&
-        typeof lastResult.result === "string"
-        ? lastResult.result
-        : null;
-    const reply = (result.text.trim() || lastToolText || "").trim().slice(0, 450);
-    return { reply: reply || null, ok: true, steps: result.steps.length };
+    if (leaked) {
+      return {
+        reply: null,
+        ok: false,
+        steps,
+        error:
+          "Model returned an unparsed tool call instead of a real reply, twice in a row",
+      };
+    }
+    return { reply, ok: true, steps };
   } catch (error) {
     return {
       reply: null,
