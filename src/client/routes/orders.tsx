@@ -885,13 +885,12 @@ const StaffOrders = () => {
 
                     {/* Share */}
                     <div className="px-5 py-5">
-                      <button
+                          <button
                         onClick={async () => {
                           if (!activeOrder) return;
                           try {
                             const api = await getApi();
-                            const { token } = await api.createTrackingLink(activeOrder.id);
-                            const url = `${window.location.origin}/orders/${activeOrder.id}?t=${token}`;
+                            const { url } = await api.createTrackingLink(activeOrder.id);
                             await navigator.clipboard.writeText(url);
                             setLinkCopied(true);
                             setTimeout(() => setLinkCopied(false), 2000);
@@ -921,13 +920,7 @@ const StaffOrders = () => {
 // Replying happens over SMS, which is the only channel this system actually
 // answers on today; a web reply box would need its own delivery pipeline
 // into Dara, which doesn't exist yet.
-const PublicOrderTracking = ({
-  orderId,
-  token,
-}: {
-  orderId: string;
-  token: string;
-}) => {
+const PublicOrderTracking = ({ orderId, orgId }: { orderId: string; orgId: string }) => {
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "error"; message: string }
@@ -938,7 +931,7 @@ const PublicOrderTracking = ({
     let cancelled = false;
     setState({ status: "loading" });
     publicApi()
-      .trackOrder(orderId, token)
+      .trackOrder(orderId, orgId)
       .then(({ order, thread }) => {
         if (!cancelled) setState({ status: "ready", order, thread });
       })
@@ -953,7 +946,7 @@ const PublicOrderTracking = ({
     return () => {
       cancelled = true;
     };
-  }, [orderId, token]);
+  }, [orderId, orgId]);
 
   if (state.status === "loading") {
     return (
@@ -1120,10 +1113,10 @@ export const Orders = () => {
   // staff view (see StaffOrders).
   const { id } = useParams();
   const [searchParams] = useSearchParams();
-  const token = searchParams.get("t");
+  const orgId = searchParams.get("o");
 
-  if (id && token) {
-    return <PublicOrderTracking orderId={id} token={token} />;
+  if (id && orgId) {
+    return <PublicOrderTracking orderId={id} orgId={orgId} />;
   }
 
   return (

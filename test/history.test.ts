@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripQuoted } from "./history";
+import { stripQuoted } from "../src/agent/history";
 
 describe("stripQuoted", () => {
   it("cuts an Outlook-style original-message block", () => {

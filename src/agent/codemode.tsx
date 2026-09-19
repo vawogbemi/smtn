@@ -5,7 +5,12 @@ import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { RPC, type Env, type Package, type PlaceSuggestion } from "../rpc";
 import { tenantFor } from "../directory";
-import { mintProfileToken } from "../links/profile";
+import {
+  select as daoSelect,
+  write as daoWrite,
+  getMemory as daoGetMemory,
+  setMemory as daoSetMemory,
+} from "../db/queries";
 import type { WriteOp, SessionMessageView } from "../tenant";
 
 // Dara's tool surface, built on @cloudflare/codemode: the model writes one
@@ -27,9 +32,9 @@ const MODEL = "@cf/zai-org/glm-4.7-flash";
 
 // Where a link built server-side (no browser, so no window.location) points.
 // Falls back to production; .dev.vars overrides it to the local client.
-function profileUrl(env: Env, customerId: string, token: string): string {
+function profileUrl(env: Env, customerId: string, orgId: string): string {
   const base = env.APP_URL ?? "https://smtncargo.com";
-  return `${base}/profile?c=${encodeURIComponent(customerId)}&t=${encodeURIComponent(token)}`;
+  return `${base}/profile?c=${encodeURIComponent(customerId)}&o=${encodeURIComponent(orgId)}`;
 }
 
 const SCHEMA_DOC = `SQLite schema (timestamps are epoch milliseconds):
@@ -142,7 +147,7 @@ function buildTools(session: Session): Record<string, ToolDef> {
       }: {
         sql: string;
         params?: unknown[];
-      }) => db().select(sql, ...(params ?? [])),
+      }) => daoSelect(tenantFor(env, orgId), sql, ...(params ?? [])),
     },
 
     // Safe to expose even in a read-only SMS session: it only derives a
@@ -158,12 +163,11 @@ function buildTools(session: Session): Record<string, ToolDef> {
 Never invent a customerId or a phone number -- one you made up, copied from an example, or guessed is not a real row, and minting a link for it produces a link that looks real but 404s the moment anyone opens it. Use only a phone number you were actually given (by the task, or by whoever is texting). If the task doesn't name a customer and none is bound to this session, don't guess -- say you need to know which customer first.
 Retyping a URL from memory in a later message corrupts it (wrong domain, dropped token) -- build the complete reply in the same script that calls this, using the exact url string this returns, and return that finished reply as the script's result. Example: return \`Here's the link: \${url}\`;`,
       inputSchema: z.object({ customerId: z.string().optional() }),
-      execute: async ({ customerId: explicitId }: { customerId?: string }) => {
-        const id = canWrite ? (explicitId ?? customerId) : customerId;
-        if (!id) throw new Error("createProfileLink needs a customerId");
-        const token = await mintProfileToken(env, orgId, id);
-        return { url: profileUrl(env, id, token) };
-      },
+        execute: async ({ customerId: explicitId }: { customerId?: string }) => {
+          const id = canWrite ? (explicitId ?? customerId) : customerId;
+          if (!id) throw new Error("createProfileLink needs a customerId");
+          return { url: profileUrl(env, id, orgId) };
+        },
     },
 
     // Same explicit-id-only-when-canWrite pattern as createProfileLink, so a
@@ -176,7 +180,7 @@ Retyping a URL from memory in a later message corrupts it (wrong domain, dropped
       execute: async ({ customerId: explicitId }: { customerId?: string }) => {
         const id = canWrite ? (explicitId ?? customerId) : customerId;
         if (!id) throw new Error("getMemory needs a customerId");
-        return { memory: await db().getMemory(id) };
+        return { memory: await daoGetMemory(tenantFor(env, orgId), id) };
       },
     },
 
@@ -196,7 +200,7 @@ Retyping a URL from memory in a later message corrupts it (wrong domain, dropped
       }) => {
         const id = canWrite ? (explicitId ?? customerId) : customerId;
         if (!id) throw new Error("setMemory needs a customerId");
-        await db().setMemory(id, content);
+        await daoSetMemory(tenantFor(env, orgId), id, content);
         return { ok: true };
       },
     },
@@ -242,7 +246,7 @@ Example -- create an order with one package for a possibly-new customer in a shi
     { table: "packages", id: crypto.randomUUID(), data: { order_id: orderId, number: "1", weight: 10 } },
   ] });`,
       inputSchema: z.object({ ops: z.array(writeOpSchema) }),
-      execute: async ({ ops }: { ops: WriteOp[] }) => db().write(ops),
+      execute: async ({ ops }: { ops: WriteOp[] }) => daoWrite(tenantFor(env, orgId), ops),
     };
   }
 

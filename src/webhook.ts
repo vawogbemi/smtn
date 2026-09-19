@@ -4,6 +4,12 @@ import { RPC, type Env, type Order } from "./rpc";
 import { daraSms } from "./agent/codemode";
 import { tenantForNumber } from "./directory";
 import type { TenantDO } from "./tenant";
+import {
+  getSessionHistory,
+  upsertCustomer,
+  recordMessage,
+  recordEvent,
+} from "./db/queries";
 
 // Runs in ctx.waitUntil after the webhook has already responded: builds the
 // conversation history, asks Dara for a reply, texts it to the sender only,
@@ -25,14 +31,14 @@ async function replyWithDara(
     // tenant.ts). Labeled by actor at write time (so an operator's reply
     // doesn't read back to Dara as its own) and byte-budgeted on read,
     // replacing the old hand-rolled buildHistory(thread(...)) truncation.
-    const messages = await opts.tenant.getSessionHistory(opts.customerId);
+    const messages = await getSessionHistory(opts.tenant, opts.customerId);
 
     const outcome = await daraSms(env, ctx, opts.orgId, messages, opts.customerId);
 
     // Both failure modes used to end here silently: the customer got no reply
     // and nobody found out. They are now the top of the operator inbox.
     if (!outcome.ok || !outcome.reply) {
-      await opts.tenant.recordEvent({
+      await recordEvent(opts.tenant, {
         type: outcome.ok ? "agent.silent" : "agent.failed",
         actor: "dara",
         summary: outcome.ok
@@ -47,7 +53,7 @@ async function replyWithDara(
 
     const reply = outcome.reply;
     await new RPC(env, ctx).sendMessage([{ to: opts.from, body: reply }]);
-    await opts.tenant.recordMessage({
+    await recordMessage(opts.tenant, {
       id: crypto.randomUUID(),
       customerId: opts.customerId,
       direction: "outbound",
@@ -56,7 +62,7 @@ async function replyWithDara(
       from: opts.to,
       to: opts.from,
     });
-    await opts.tenant.recordEvent({
+    await recordEvent(opts.tenant, {
       type: "message.out",
       actor: "dara",
       summary: reply.slice(0, 140),
@@ -65,18 +71,16 @@ async function replyWithDara(
     });
   } catch (error) {
     console.error("Dara SMS reply failed:", error);
-    await opts.tenant
-      .recordEvent({
-        type: "agent.error",
-        actor: "system",
-        summary: `Dara reply threw for ${opts.from}`,
-        status: "failed",
-        payload: {
-          error: error instanceof Error ? error.message : String(error),
-        },
-        customerId: opts.customerId,
-      })
-      .catch((e) => console.error("Could not record agent.error:", e));
+    await recordEvent(opts.tenant, {
+      type: "agent.error",
+      actor: "system",
+      summary: `Dara reply threw for ${opts.from}`,
+      status: "failed",
+      payload: {
+        error: error instanceof Error ? error.message : String(error),
+      },
+      customerId: opts.customerId,
+    }).catch((e) => console.error("Could not record agent.error:", e));
   }
 }
 
@@ -128,11 +132,11 @@ export async function handleTwilioWebhook(
       );
     }
     const { orgId, tenant } = owner;
-    const customerId = await tenant.upsertCustomer(from);
+    const customerId = await upsertCustomer(tenant, from);
 
     // Twilio retries deliveries; recordMessage reports the sid as already
     // stored, so we ack without duplicating it or replying twice.
-    const isNew = await tenant.recordMessage({
+    const isNew = await recordMessage(tenant, {
       id: crypto.randomUUID(),
       sid,
       customerId,
@@ -144,7 +148,7 @@ export async function handleTwilioWebhook(
     });
 
     if (isNew) {
-      await tenant.recordEvent({
+      await recordEvent(tenant, {
         type: "message.in",
         actor: "customer",
         summary: body.slice(0, 140),

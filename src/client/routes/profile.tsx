@@ -19,13 +19,7 @@ type State =
   | { status: "form"; profile: CustomerProfileView }
   | { status: "submitted"; profile: CustomerProfileView };
 
-const ProfileForm = ({
-  customerId,
-  token,
-}: {
-  customerId: string;
-  token: string;
-}) => {
+const ProfileForm = ({ customerId, orgId }: { customerId: string; orgId: string }) => {
   const [state, setState] = useState<State>({ status: "loading" });
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -39,7 +33,7 @@ const ProfileForm = ({
   useEffect(() => {
     let cancelled = false;
     publicApi()
-      .getProfile(customerId, token)
+      .getProfile(customerId, orgId)
       .then((profile) => {
         if (cancelled) return;
         setName(profile.name ?? "");
@@ -66,7 +60,7 @@ const ProfileForm = ({
     return () => {
       cancelled = true;
     };
-  }, [customerId, token]);
+  }, [customerId, orgId]);
 
   const handleAddressChange = (value: string) => {
     setAddressInput(value);
@@ -101,7 +95,7 @@ const ProfileForm = ({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const profile = await publicApi().submitProfile(customerId, token, {
+      const profile = await publicApi().submitProfile(customerId, orgId, {
         name: name.trim(),
         email: email.trim() || null,
         address,
@@ -247,25 +241,25 @@ const ProfileForm = ({
   );
 };
 
-// The route's entry point. c (customerId) and t (token) both come from the
-// link Dara or an operator sent -- missing either means a broken/incomplete
-// link rather than an in-app state to recover from.
+// The route's entry point. c (customerId) and o (organization id) both come
+// from the link Dara or an operator sent -- missing either means a
+// broken/incomplete link rather than an in-app state to recover from.
 export const Profile = () => {
   const [searchParams] = useSearchParams();
   const customerId = searchParams.get("c");
-  const token = searchParams.get("t");
+  const orgId = searchParams.get("o");
 
-  if (!customerId || !token) {
+  if (!customerId || !orgId) {
     return (
       <div className="flex w-full h-full items-center justify-center p-6 text-center">
         <p className="text-sm text-text-secondary">
-          This link is missing its id or token.
+          This link is missing its id or org.
         </p>
       </div>
     );
   }
 
-  return <ProfileForm customerId={customerId} token={token} />;
+  return <ProfileForm customerId={customerId} orgId={orgId} />;
 };
 
 export default Profile;

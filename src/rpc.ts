@@ -4,8 +4,15 @@ import { Shippo, WeightUnitEnum, DistanceUnitEnum } from "shippo";
 import twilio from "twilio";
 import { unzipSync } from "fflate";
 import { registry, tenantFor } from "./directory";
-import { mintTrackingToken, verifyTrackingToken } from "./links/tracking";
-import { mintProfileToken, verifyProfileToken } from "./links/profile";
+import {
+  getCustomerProfile,
+  listOrders as daoListOrders,
+  ordersByIds as daoOrdersByIds,
+  listShipments as daoListShipments,
+  getShipment as daoGetShipment,
+  listMessages as daoListMessages,
+  thread as daoThread,
+} from "./db/queries";
 import type {
   CustomerProfileView,
   ImportInput,
@@ -36,19 +43,11 @@ export interface Env {
   REGISTRY: DurableObjectNamespace<RegistryDO>;
   CLERK_SECRET_KEY?: string;
   CLERK_JWT_KEY?: string;
-  // HMAC signing key for customer tracking links (tracking.ts). Any secret
-  // string works; rotating it invalidates every outstanding link at once,
-  // since there is no per-token revocation.
-  TRACKING_LINK_SECRET?: string;
-  // Same shape, separate secret, for customer profile links (profile.ts) --
-  // deliberately not shared with TRACKING_LINK_SECRET so the two token
-  // families can never cross-verify.
-  PROFILE_LINK_SECRET?: string;
+  APP_URL?: string;
   // Canonical origin used when a link is built server-side with no browser
   // to read window.location.origin from (Dara's SMS replies). Falls back to
   // production; override in .dev.vars to point local-dev-minted links at the
   // local client.
-  APP_URL?: string;
   [key: string]: any;
 }
 
@@ -115,21 +114,21 @@ export interface PublicApi {
     office: PlaceSuggestion,
     packages: Package[],
   ): Promise<ShippingProduct[]>;
-  // Authenticated by a signed token, not a session -- this is how a customer
-  // with no account reaches their own order and nothing else. See tracking.ts.
+  // Authenticated by an explicit org id in the URL rather than a signed
+  // token: a customer with a link and no account reaches only their own
+  // order. The org is provided as a query parameter.
   trackOrder(
     orderId: string,
-    token: string,
+    orgId: string,
   ): Promise<{ order: OrderView; thread: MessageView[] }>;
-  // Same pattern, for the profile form: a customer with a link and no
-  // account reaches only their own profile. See profile.ts.
-  getProfile(
-    customerId: string,
-    token: string,
-  ): Promise<CustomerProfileView>;
+  // No signed token: profile links include the tenant/org id directly so a
+  // browser hitting the link can be routed to the right tenant without a
+  // session. See client/routes/profile.tsx and agent/codemode.tsx for link
+  // construction.
+  getProfile(customerId: string, orgId: string): Promise<CustomerProfileView>;
   submitProfile(
     customerId: string,
-    token: string,
+    orgId: string,
     patch: { name: string; email?: string | null; address?: PlaceView | null },
   ): Promise<CustomerProfileView>;
 }
@@ -154,11 +153,10 @@ export interface TenantApi {
   importPackages(input: ImportInput): Promise<{ created: number }>;
   appendMessage(message: MessageInput): Promise<boolean>;
   markHandled(eventId: number): Promise<void>;
-  // Mints a signed token for trackOrder(); the caller builds the full URL
-  // (this.#env has no canonical domain to attach one to).
-  createTrackingLink(orderId: string): Promise<{ token: string }>;
+  // Returns a full tracking URL for the given order (includes org id).
+  createTrackingLink(orderId: string): Promise<{ url: string }>;
   // Same pattern for the profile form's link. See profile.ts.
-  createProfileLink(customerId: string): Promise<{ token: string }>;
+  createProfileLink(customerId: string): Promise<{ url: string }>;
   getCustomerProfile(customerId: string): Promise<CustomerProfileView | null>;
   updateSettings(patch: {
     name?: string;
@@ -188,7 +186,7 @@ export class RPC {
   constructor(
     private env: Env,
     private ctx: ExecutionContext,
-  ) {}
+  ) { }
 
   // All three clients are lazy: their constructors throw on missing keys, and
   // tenant reads share this target, so eager construction meant one unset
@@ -654,33 +652,30 @@ export class PublicRPC extends RpcTarget implements PublicApi {
     return this.#rpc.getProducts(place, office, packages);
   }
 
-  async trackOrder(orderId: string, token: string) {
-    const { orgId } = await verifyTrackingToken(this.#env, token, orderId);
+  async trackOrder(orderId: string, orgId: string) {
     const tenant = tenantFor(this.#env, orgId);
-    const [order] = await tenant.ordersByIds([orderId]);
+    const [order] = await daoOrdersByIds(tenant, [orderId]);
     if (!order) throw new Error("Order not found");
     const thread = order.customers
-      ? await tenant.thread(order.customers.id)
+      ? await daoThread(tenant, order.customers.id)
       : [];
     return { order, thread };
   }
 
-  async getProfile(customerId: string, token: string) {
-    const { orgId } = await verifyProfileToken(this.#env, token, customerId);
-    const profile = await tenantFor(this.#env, orgId).getCustomerProfile(
-      customerId,
-    );
+  async getProfile(customerId: string, orgId: string) {
+    const tenant = tenantFor(this.#env, orgId);
+    const profile = await getCustomerProfile(tenant, customerId);
     if (!profile) throw new Error("Customer not found");
     return profile;
   }
 
   async submitProfile(
     customerId: string,
-    token: string,
+    orgId: string,
     patch: { name: string; email?: string | null; address?: PlaceView | null },
   ) {
-    const { orgId } = await verifyProfileToken(this.#env, token, customerId);
-    return tenantFor(this.#env, orgId).submitProfile(customerId, patch);
+    const tenant = tenantFor(this.#env, orgId);
+    return updateCustomerProfile(tenant, customerId, patch);
   }
 }
 
@@ -714,17 +709,19 @@ export class TenantRPC extends RpcTarget implements TenantApi {
   }
 
   async createTrackingLink(orderId: string) {
-    const token = await mintTrackingToken(this.#env, this.#orgId, orderId);
-    return { token };
+    const base = this.#env.APP_URL ?? "https://smtncargo.com";
+    const url = `${base}/orders/${encodeURIComponent(orderId)}?o=${encodeURIComponent(this.#orgId)}`;
+    return { url };
   }
 
   async createProfileLink(customerId: string) {
-    const token = await mintProfileToken(this.#env, this.#orgId, customerId);
-    return { token };
+    const base = this.#env.APP_URL ?? "https://smtncargo.com";
+    const url = `${base}/profile?c=${encodeURIComponent(customerId)}&o=${encodeURIComponent(this.#orgId)}`;
+    return { url };
   }
 
   getCustomerProfile(customerId: string) {
-    return this.#tenant.getCustomerProfile(customerId);
+    return getCustomerProfile(this.#tenant, customerId);
   }
 
   async updateSettings(patch: {
@@ -746,27 +743,27 @@ export class TenantRPC extends RpcTarget implements TenantApi {
   }
 
   listOrders() {
-    return this.#tenant.listOrders();
+    return daoListOrders(this.#tenant);
   }
 
   ordersByIds(ids: string[]) {
-    return this.#tenant.ordersByIds(ids);
+    return daoOrdersByIds(this.#tenant, ids);
   }
 
   listShipments() {
-    return this.#tenant.listShipments();
+    return daoListShipments(this.#tenant);
   }
 
   getShipment(shipmentId: string) {
-    return this.#tenant.getShipment(shipmentId);
+    return daoGetShipment(this.#tenant, shipmentId);
   }
 
   listMessages(limit = 200) {
-    return this.#tenant.listMessages(limit);
+    return daoListMessages(this.#tenant, limit);
   }
 
   thread(customerId: string, limit = 50) {
-    return this.#tenant.thread(customerId, limit);
+    return daoThread(this.#tenant, customerId, limit);
   }
 
   inbox(limit = 50) {

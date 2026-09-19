@@ -1,10 +1,10 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import { assertReadOnlyQuery, assertWritableOp } from "./tenant";
+import { assertReadOnlyQuery, assertWritableOp } from "../src/tenant";
 // The pool types `env` as `Cloudflare.Env`, a namespace interface designed to
 // be merged with. Aliased on import because a bare `Env` inside the
 // declaration would bind to the empty global one, not ours.
-import type { Env as WorkerEnv } from "./rpc";
+import type { Env as WorkerEnv } from "../src/rpc";
 
 declare global {
   namespace Cloudflare {
