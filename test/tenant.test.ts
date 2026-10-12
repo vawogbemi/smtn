@@ -233,6 +233,26 @@ describe("TenantDO", () => {
     expect(ada[0].packages).toHaveLength(1);
   });
 
+  it("creates a shipment from the manifest when no shipment was selected", async () => {
+    const t = tenant("manifest-first-import-test");
+
+    const result = await t.importPackages({
+      fileName: "october-manifest.xlsx",
+      defaultTitle: "New Shipment",
+      from: { description: "Lagos Office", placeId: "lag" },
+      to: { description: "Toronto Office", placeId: "tor" },
+      packages: [
+        { number: "1", name: "Ada", phone: "+2348011111111", weight: 12 },
+      ],
+    });
+
+    expect(result.created).toBe(1);
+    const shipment = await t.getShipment(result.shipmentId);
+    expect(shipment?.title).toBe("october-manifest.xlsx");
+    expect(shipment?.orders).toHaveLength(1);
+    expect(shipment?.orders[0].customers?.name).toBe("Ada");
+  });
+
   it("assembles nested orders and filters by id", async () => {
     const t = tenant("orders-view-test");
     const shipmentId = await t.createShipment("Lagos June");

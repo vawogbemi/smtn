@@ -128,7 +128,7 @@ export interface TenantSettings {
 }
 
 export interface ImportInput {
-  shipmentId: string;
+  shipmentId?: string;
   fileName?: string | null;
   defaultTitle?: string | null;
   from: PlaceView;
@@ -225,7 +225,7 @@ export interface SessionMessageView {
 }
 
 // Summarization is plain text-completion, not tool-calling, so it isn't
-// bound by agent/codemode.tsx's MODEL constraint (qwen2.5-coder's lack of
+// bound by agent/dara.ts's MODEL constraint (qwen2.5-coder's lack of
 // real function-calling). Reuses the same model for now anyway, one fewer
 // model to reason about -- swapping to something cheaper later touches only
 // this constant. Duplicated rather than imported to keep tenant.ts free of
@@ -757,10 +757,22 @@ export class TenantDO extends DurableObject<Env> {
   // Replaces the multi-entity Instant transaction. Every statement runs with
   // no await between them, so the whole import commits atomically -- an order
   // can never land without its packages.
-  async importPackages(input: ImportInput): Promise<{ created: number }> {
+  async importPackages(
+    input: ImportInput,
+  ): Promise<{ created: number; shipmentId: string }> {
     const sql = this.ctx.storage.sql;
     const now = Date.now();
+    const shipmentId = input.shipmentId ?? crypto.randomUUID();
     let created = 0;
+
+    if (!input.shipmentId) {
+      sql.exec(
+        "INSERT INTO shipments (id, title, created_at) VALUES (?, ?, ?)",
+        shipmentId,
+        input.fileName ?? input.defaultTitle ?? "New Shipment",
+        now,
+      );
+    }
 
     for (const pkg of input.packages) {
       const phone = pkg.phone?.trim();
@@ -797,7 +809,7 @@ export class TenantDO extends DurableObject<Env> {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         orderId,
         customerId,
-        input.shipmentId,
+        shipmentId,
         input.to.description,
         input.to.placeId,
         input.from.description,
@@ -823,13 +835,14 @@ export class TenantDO extends DurableObject<Env> {
       sql.exec(
         "UPDATE shipments SET title = ? WHERE id = ? AND title = ?",
         input.fileName,
-        input.shipmentId,
+        shipmentId,
         input.defaultTitle,
       );
     }
 
     this.#broadcast({ type: "invalidate", scope: "orders" });
-    return { created };
+    this.#broadcast({ type: "invalidate", scope: "shipments" });
+    return { created, shipmentId };
   }
 
   // One-time load of the InstantDB export. Idempotent by primary key, so a

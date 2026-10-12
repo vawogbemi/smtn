@@ -1,7 +1,7 @@
 import { Provider, defaultTheme } from "@adobe/react-spectrum";
-import { ClerkProvider } from "@clerk/clerk-react";
+import { ClerkProvider, useAuth } from "@clerk/clerk-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { BrowserRouter, Route, Routes } from "react-router";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router";
 import { Spinner } from "./components/misc.js";
 import { ThemeProvider, useTheme } from "./components/theme";
 import { RequireTenant } from "./onboarding";
@@ -12,6 +12,19 @@ import { Shipments, Shipment } from "./routes/shipments";
 import Profile from "./routes/profile";
 
 import Orders from "./routes/orders";
+
+const ShipmentWorkspace = () => {
+  const { isLoaded, isSignedIn } = useAuth();
+
+  if (!isLoaded) return <Spinner />;
+  if (!isSignedIn) return <Navigate to="/" replace />;
+
+  return (
+    <RequireTenant>
+      <Dashboard hideHeader />
+    </RequireTenant>
+  );
+};
 
 const FixedTheme = ({ children }: { children: ReactNode }) => (
   <div data-theme="light" className="w-full h-full">
@@ -43,9 +56,15 @@ const Layout = () => {
       <BrowserRouter>
         <Routes>
           <Route index element={<FixedTheme><Index /></FixedTheme>} />
-          {/* Sign-in, company creation, and tenant provisioning all happen in
-              RequireTenant before any dashboard route renders. The customer
-              routes below stay public -- shippers never get an account. */}
+          <Route path="shipments" element={<ShipmentWorkspace />}>
+            <Route index element={<Shipments />} />
+            <Route path=":shipmentId" element={<Shipment />} />
+          </Route>
+          <Route
+            path="dashboard/shipments"
+            element={<Navigate to="/shipments" replace />}
+          />
+          {/* Company creation and tenant provisioning happen before dashboard routes render. */}
           <Route
             path="dashboard"
             element={
@@ -54,15 +73,8 @@ const Layout = () => {
               </RequireTenant>
             }
           >
-            {/* Orders is the main view -- activity.tsx (a duplicate of this
-                same component) is gone. Orders also stays mounted at the
-                top-level /orders paths below: PublicOrderTracking (reached
-                via a ?t= tracking token, no account) can't sit behind
-                RequireTenant the way this nested route is. */}
-            <Route index element={<Orders />} />
-            <Route path="shipments" element={<Shipments />}>
-              <Route path=":shipmentId" element={<Shipment />} />
-            </Route>
+            <Route index element={<Navigate to="/shipments" replace />} />
+            <Route path="orders" element={<Orders />} />
           </Route>
           <Route path="orders" element={<Orders />} />
           {/* Order id for a public tracking link (?t=...), customer id for

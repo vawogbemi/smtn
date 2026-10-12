@@ -4,11 +4,12 @@ import { renderToString } from "react-dom/server";
 import { ViteClient, Script, Link, ReactRefresh } from "vite-ssr-components/react";
 import { newWorkersRpcResponse } from "capnweb";
 import { PublicRPC, TenantRPC, type Env } from "./rpc";
-import { dara } from "./agent/codemode";
+import { dara } from "./agent/dara";
 import { tenantFor } from "./directory";
 import { AuthError, requireSession } from "./auth";
 export { TenantDO } from "./tenant";
 export { RegistryDO } from "./registry";
+export { DaraAgent } from "./agent/dara";
 import { handleStripeWebhook, handleTwilioWebhook } from "./webhook";
 import App from "./client/App";
 
@@ -27,7 +28,14 @@ app.post("/webhook/twilio", (c) =>
 app.use("/rpc", cors());
 
 app.all("/rpc", (c) =>
-  newWorkersRpcResponse(c.req.raw, new PublicRPC(c.env, c.executionCtx)),
+  newWorkersRpcResponse(
+    c.req.raw,
+    new PublicRPC(
+      c.env,
+      c.executionCtx,
+      c.req.header("cf-connecting-ip") ?? "local",
+    ),
+  ),
 );
 
 // Everything tenant-scoped. The org comes from the verified token and is fixed
@@ -96,7 +104,7 @@ app.post("/dara", async (c) => {
       .json<{ task?: string }>()
       .catch(() => ({}) as { task?: string });
     if (!task) return c.json({ error: "task is required" }, 400);
-    return c.json(await dara(c.env, c.executionCtx, orgId, task));
+    return c.json(await dara(c.env, orgId, task));
   } catch (error) {
     if (error instanceof AuthError) {
       return c.json({ error: error.message }, error.status);

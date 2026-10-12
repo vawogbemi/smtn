@@ -28,9 +28,15 @@
 	"ai": {
 		"binding": "AI"
 	},
-	"worker_loaders": [
+	"ratelimits": [
 		{
-			"binding": "LOADER"
+			"name": "FILE_PARSE_LIMITER",
+			// Keep this namespace dedicated to public manifest parsing.
+			"namespace_id": "783201",
+			"simple": {
+				"limit": 10,
+				"period": 60
+			}
 		}
 	],
 	"durable_objects": {
@@ -42,6 +48,10 @@
 			{
 				"name": "REGISTRY",
 				"class_name": "RegistryDO"
+			},
+			{
+				"name": "DARA",
+				"class_name": "DaraAgent"
 			}
 		]
 	},
@@ -56,6 +66,12 @@
 			"tag": "v2",
 			"new_sqlite_classes": [
 				"RegistryDO"
+			]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": [
+				"DaraAgent"
 			]
 		}
 	],

@@ -1,17 +1,28 @@
 import { Button } from "../components/Button";
-import { IconBell, IconInbox } from "@tabler/icons-react";
+import { IconBell, IconInbox, IconPackage } from "@tabler/icons-react";
 import { DialogTrigger } from "@react-spectrum/s2";
 import { Popover } from "@react-spectrum/s2";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { Outlet, useNavigate } from "react-router";
 import { OrganizationSwitcher, UserButton } from "@clerk/clerk-react";
+import type { ReactNode } from "react";
 
-export const Dashboard = () => {
+export const Dashboard = ({
+  hideHeader = false,
+  children,
+}: {
+  hideHeader?: boolean;
+  children?: ReactNode;
+}) => {
   const navigate = useNavigate();
 
   return (
-    <div className="flex flex-col w-full h-full bg-surface pt-3 pb-3 px-3 gap-2">
-      <div className="flex items-center justify-between w-full shrink-0">
+    <div
+      className={`flex h-full w-full flex-col ${
+        hideHeader ? "" : "gap-2 bg-surface px-3 pb-3 pt-3"
+      }`}
+    >
+      {!hideHeader && <div className="flex items-center justify-between w-full shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <img
             src="https://public.smtncargo.com/smtnlogo.jpg"
@@ -19,18 +30,22 @@ export const Dashboard = () => {
           />
           <OrganizationSwitcher
             hidePersonal
-            afterSelectOrganizationUrl="/dashboard"
-            afterCreateOrganizationUrl="/dashboard"
+            afterSelectOrganizationUrl="/shipments"
+            afterCreateOrganizationUrl="/shipments"
           />
         </div>
         <div className="flex items-center gap-1">
-          {/* Orders is the dashboard's index route now, so this is a way
-              back to it from elsewhere in the dashboard (shipments), not a
-              separate destination. */}
+          <Button
+            variant="quiet"
+            aria-label="Shipments"
+            onPress={() => navigate("/shipments")}
+          >
+            <IconPackage className="h-5 w-5" />
+          </Button>
           <Button
             variant="quiet"
             aria-label="Orders"
-            onPress={() => navigate("/dashboard")}
+            onPress={() => navigate("/dashboard/orders")}
           >
             <IconInbox className="h-5 w-5" />
           </Button>
@@ -43,10 +58,10 @@ export const Dashboard = () => {
           </DialogTrigger>
           <UserButton afterSignOutUrl="/" />
         </div>
-      </div>
+      </div>}
 
       <div className="w-full flex-1 min-h-0">
-        <Outlet />
+        {children ?? <Outlet />}
       </div>
     </div>
   );

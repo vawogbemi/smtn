@@ -1,16 +1,16 @@
 import {
   CreateOrganization,
-  SignIn,
   useAuth,
   useOrganization,
 } from "@clerk/clerk-react";
 import { useEffect, useState, type ReactNode } from "react";
+import { Navigate, useLocation } from "react-router";
 import { Spinner } from "./components/misc.js";
 import { describeTenantAuthError, useTenantApi } from "./data";
 
 // The dashboard's front door. Three gates in order:
 //
-//   1. signed out            -> Clerk sign-in
+//   1. signed out            -> home page Clerk sign-in
 //   2. signed in, no org     -> name your company (Clerk's own form)
 //   3. org selected          -> provision the tenant, then render
 //
@@ -25,6 +25,7 @@ const Centered = ({ children }: { children: ReactNode }) => (
 );
 
 export const RequireTenant = ({ children }: { children: ReactNode }) => {
+  const location = useLocation();
   const { isLoaded, isSignedIn, orgId, getToken } = useAuth();
   const { organization } = useOrganization();
   const getApi = useTenantApi();
@@ -69,13 +70,7 @@ export const RequireTenant = ({ children }: { children: ReactNode }) => {
 
   if (!isLoaded) return <Spinner />;
 
-  if (!isSignedIn) {
-    return (
-      <Centered>
-        <SignIn routing="hash" />
-      </Centered>
-    );
-  }
+  if (!isSignedIn) return <Navigate to="/" replace />;
 
   // Signed in with no organization. Clerk's form collects the company name,
   // which becomes the tenant's name, the SMS signature, and part of the
@@ -89,7 +84,7 @@ export const RequireTenant = ({ children }: { children: ReactNode }) => {
           </p>
           <CreateOrganization
             routing="hash"
-            afterCreateOrganizationUrl="/dashboard"
+            afterCreateOrganizationUrl={`${location.pathname}${location.search}`}
           />
         </div>
       </Centered>

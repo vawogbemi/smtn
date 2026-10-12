@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 import twilio from "twilio";
 import { RPC, type Env, type Order } from "./rpc";
-import { daraSms } from "./agent/codemode";
+import { daraSms } from "./agent/dara";
 import { tenantForNumber } from "./directory";
 import type { TenantDO } from "./tenant";
 import {
@@ -33,7 +33,7 @@ async function replyWithDara(
     // replacing the old hand-rolled buildHistory(thread(...)) truncation.
     const messages = await getSessionHistory(opts.tenant, opts.customerId);
 
-    const outcome = await daraSms(env, ctx, opts.orgId, messages, opts.customerId);
+    const outcome = await daraSms(env, opts.orgId, messages, opts.customerId);
 
     // Both failure modes used to end here silently: the customer got no reply
     // and nobody found out. They are now the top of the operator inbox.

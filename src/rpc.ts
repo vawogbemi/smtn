@@ -2,7 +2,7 @@ import { RpcTarget } from "capnweb";
 import Stripe from "stripe";
 import { Shippo, WeightUnitEnum, DistanceUnitEnum } from "shippo";
 import twilio from "twilio";
-import { unzipSync } from "fflate";
+import { parseManifest } from "./manifest-parser";
 import { registry, tenantFor } from "./directory";
 import {
   getCustomerProfile,
@@ -25,6 +25,8 @@ import type {
   TenantSettings,
 } from "./tenant";
 import type { RegistryDO } from "./registry";
+import type { DaraAgent } from "./agent/dara";
+import { dara } from "./agent/dara";
 
 const TWILIO_FROM_NUMBER = "+16479526586";
 
@@ -38,7 +40,8 @@ export interface Env {
   TWILIO_ACCOUNT_SID: string;
   TWILIO_AUTH_TOKEN: string;
   AI: Ai;
-  LOADER: WorkerLoader;
+  FILE_PARSE_LIMITER: RateLimit;
+  DARA: DurableObjectNamespace<DaraAgent>;
   TENANT: DurableObjectNamespace<TenantDO>;
   REGISTRY: DurableObjectNamespace<RegistryDO>;
   CLERK_SECRET_KEY?: string;
@@ -51,8 +54,7 @@ export interface Env {
   [key: string]: any;
 }
 
-// Loose on purpose: submit() receives raw form data from the booking page, and
-// parseFile() hands back whatever the model extracted from a manifest.
+// Loose on purpose: submit() receives raw form data from the booking page.
 export interface Order {
   id?: string;
   createdAt?: number | string | null;
@@ -104,8 +106,8 @@ interface ShippingAddress {
   country: string;
 }
 
-// Reachable without a session: the public booking page needs quotes before
-// anyone has an account. Nothing here reads or writes tenant data.
+// Reachable without a session: public booking and manifest previews do not
+// read or write tenant data.
 export interface PublicApi {
   submit(value: Order): Promise<string | null>;
   getPlaceSuggestions(input: string): Promise<PlaceSuggestion[]>;
@@ -114,6 +116,13 @@ export interface PublicApi {
     office: PlaceSuggestion,
     packages: Package[],
   ): Promise<ShippingProduct[]>;
+  // Anonymous previews parse tabular manifests and are rate-limited.
+  parseFile(file: {
+    name: string;
+    type: string;
+    size: number;
+    data: string;
+  }): Promise<Package[]>;
   // Authenticated by an explicit org id in the URL rather than a signed
   // token: a customer with a link and no account reaches only their own
   // order. The org is provided as a query parameter.
@@ -123,7 +132,7 @@ export interface PublicApi {
   ): Promise<{ order: OrderView; thread: MessageView[] }>;
   // No signed token: profile links include the tenant/org id directly so a
   // browser hitting the link can be routed to the right tenant without a
-  // session. See client/routes/profile.tsx and agent/codemode.tsx for link
+  // session. See client/routes/profile.tsx and agent/dara.ts for link
   // construction.
   getProfile(customerId: string, orgId: string): Promise<CustomerProfileView>;
   submitProfile(
@@ -145,12 +154,19 @@ export interface TenantApi {
   ordersByIds(ids: string[]): Promise<OrderView[]>;
   listShipments(): Promise<ShipmentView[]>;
   getShipment(shipmentId: string): Promise<ShipmentView | null>;
+  runAgentTask(
+    task: string,
+  ): Promise<
+    { ok: true; text: string; steps: number } | { ok: false; error: string }
+  >;
   listMessages(limit?: number): Promise<MessageView[]>;
   thread(customerId: string, limit?: number): Promise<MessageView[]>;
   inbox(limit?: number): Promise<Record<string, unknown>[]>;
   createShipment(title: string): Promise<string>;
   updateShipmentTitle(shipmentId: string, title: string): Promise<void>;
-  importPackages(input: ImportInput): Promise<{ created: number }>;
+  importPackages(
+    input: ImportInput,
+  ): Promise<{ created: number; shipmentId: string }>;
   appendMessage(message: MessageInput): Promise<boolean>;
   markHandled(eventId: number): Promise<void>;
   // Returns a full tracking URL for the given order (includes org id).
@@ -163,14 +179,6 @@ export interface TenantApi {
     twilioNumber?: string | null;
     markup?: number;
   }): Promise<TenantSettings>;
-  // Both were public before the split: parseFile burns Workers AI credits and
-  // sendMessage bills real SMS, so neither belongs on an open endpoint.
-  parseFile(file: {
-    name: string;
-    type: string;
-    size: number;
-    data: string;
-  }): Promise<Package[]>;
   sendMessage(
     messages: { to: string; body: string }[],
   ): Promise<{ sent: number; failed: number }>;
@@ -185,7 +193,7 @@ export class RPC {
 
   constructor(
     private env: Env,
-    private ctx: ExecutionContext,
+    private ctx: ExecutionContext | DurableObjectState,
   ) { }
 
   // All three clients are lazy: their constructors throw on missing keys, and
@@ -447,150 +455,38 @@ export class RPC {
     return cheapest ? [cheapest] : [];
   }
 
-  private extractFileText(
-    file: { name: string; type: string },
-    bytes: Uint8Array,
-  ): string {
-    const isDocx =
-      file.type ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-      file.name.toLowerCase().endsWith(".docx");
-
-    if (isDocx) {
-      const entries = unzipSync(bytes);
-      const documentXml = entries["word/document.xml"];
-      if (!documentXml) {
-        throw new Error("Couldn't find document content inside the .docx file");
-      }
-      const xml = new TextDecoder("utf-8").decode(documentXml);
-      // docx wraps paragraphs in <w:p>; insert newlines so paragraphs don't run together.
-      return xml
-        .replace(/<\/w:p>/g, "\n")
-        .replace(/<[^>]+>/g, "")
-        .replace(/\n{2,}/g, "\n")
-        .trim()
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&apos;/g, "'")
-        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-        .replace(/&#x([0-9a-fA-F]+);/g, (_, code) =>
-          String.fromCharCode(parseInt(code, 16)),
-        )
-        .replace(/&amp;/g, "&");
-    }
-
-    const isSupportedText =
-      file.type.startsWith("text/") || file.name.toLowerCase().endsWith(".csv");
-    if (!isSupportedText) {
-      throw new Error(
-        `Unsupported file type "${file.type || file.name}" — only CSV and DOCX are supported right now.`,
-      );
-    }
-    return new TextDecoder("utf-8").decode(bytes);
-  }
-
   async parseFile(file: {
     name: string;
     type: string;
     size: number;
     data: string;
   }): Promise<Package[]> {
+    const maxFileSize = 10 * 1024 * 1024;
+    const fileName = typeof file?.name === "string"
+      ? file.name.toLowerCase()
+      : "";
+    if (
+      !file ||
+      !/\.(csv|xlsx|docx)$/.test(fileName) ||
+      !Number.isSafeInteger(file.size) ||
+      file.size < 1 ||
+      file.size > maxFileSize ||
+      typeof file.data !== "string" ||
+      file.data.length !== Math.ceil(file.size / 3) * 4
+    ) {
+      throw new Error(
+        "Choose a CSV, Excel (.xlsx), or DOCX file no larger than 10 MB.",
+      );
+    }
     const binary = atob(file.data);
+    if (binary.length !== file.size) {
+      throw new Error("The uploaded file data is invalid.");
+    }
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
     }
-    console.log(bytes.length);
-    const content = this.extractFileText(file, bytes);
-    console.log(content);
-    const response = await this.env.AI.run(
-      "@cf/meta/llama-3.1-8b-instruct-fast",
-      {
-        prompt:
-          `Extract every package/parcel listed in this shipment file and return them as JSON, add +country code to the beginning of phone numbers no space for example "+1xxxxxxxxxx", get name from consignee name, ignore value inbetween braces "[]" and also return null for the values you cant find.\n\n` +
-          `File name: ${file.name}\n` +
-          `File contents:\n${content}`,
-        max_tokens: 16384,
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            type: "object",
-            properties: {
-              packages: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    number: { type: ["string", "number"] },
-                    name: { type: ["string"] },
-                    length: { type: ["number", "null"] },
-                    width: { type: ["number", "null"] },
-                    height: { type: ["number", "null"] },
-                    weight: { type: ["number", "null"] },
-                    phone: { type: ["string", "null"] },
-                  },
-                  required: ["number", "name", "weight", "phone"],
-                },
-              },
-            },
-            required: ["packages"],
-          },
-        },
-      },
-    );
-
-    const raw = (response as { response?: unknown }).response;
-    // The model sometimes embeds raw control characters (e.g. literal newlines
-    // copied from the source file) inside JSON string values, which breaks
-    // strict JSON.parse. Escape control characters, but only while inside a
-    // string literal -- structural whitespace between tokens must stay as-is.
-    const sanitizeJson = (text: string) => {
-      let result = "";
-      let inString = false;
-      let escaped = false;
-      for (let i = 0; i < text.length; i++) {
-        const ch = text[i];
-        const code = ch.charCodeAt(0);
-        if (inString) {
-          if (escaped) {
-            result += ch;
-            escaped = false;
-          } else if (ch === "\\") {
-            result += ch;
-            escaped = true;
-          } else if (ch === '"') {
-            inString = false;
-            result += ch;
-          } else if (code === 10) {
-            result += "\\n";
-          } else if (code === 13) {
-            result += "\\r";
-          } else if (code === 9) {
-            result += "\\t";
-          } else {
-            result += ch;
-          }
-        } else {
-          if (ch === '"') inString = true;
-          result += ch;
-        }
-      }
-      return result;
-    };
-    const parsed =
-      typeof raw === "string"
-        ? JSON.parse(sanitizeJson(raw) || "{}")
-        : (raw ?? {});
-    const packages =
-      (
-        parsed as {
-          packages?: (Package & {
-            name?: string | null;
-            phone?: string | null;
-          })[];
-        }
-      ).packages ?? [];
+    const packages = await parseManifest(file.name, bytes);
     const toTitleCase = (name: string) =>
       name.replace(
         /\S+/g,
@@ -629,11 +525,13 @@ export class RPC {
 export class PublicRPC extends RpcTarget implements PublicApi {
   #rpc: RPC;
   #env: Env;
+  #clientIp: string;
 
-  constructor(env: Env, ctx: ExecutionContext) {
+  constructor(env: Env, ctx: ExecutionContext, clientIp: string) {
     super();
     this.#rpc = new RPC(env, ctx);
     this.#env = env;
+    this.#clientIp = clientIp;
   }
 
   submit(value: Order) {
@@ -650,6 +548,21 @@ export class PublicRPC extends RpcTarget implements PublicApi {
     packages: Package[],
   ) {
     return this.#rpc.getProducts(place, office, packages);
+  }
+
+  async parseFile(file: {
+    name: string;
+    type: string;
+    size: number;
+    data: string;
+  }) {
+    const { success } = await this.#env.FILE_PARSE_LIMITER.limit({
+      key: `public-file-parse:${this.#clientIp}`,
+    });
+    if (!success) {
+      throw new Error("Too many file previews. Please wait a minute and try again.");
+    }
+    return this.#rpc.parseFile(file);
   }
 
   async trackOrder(orderId: string, orgId: string) {
@@ -758,6 +671,10 @@ export class TenantRPC extends RpcTarget implements TenantApi {
     return daoGetShipment(this.#tenant, shipmentId);
   }
 
+  runAgentTask(task: string) {
+    return dara(this.#env, this.#orgId, task);
+  }
+
   listMessages(limit = 200) {
     return daoListMessages(this.#tenant, limit);
   }
@@ -788,10 +705,6 @@ export class TenantRPC extends RpcTarget implements TenantApi {
 
   markHandled(eventId: number) {
     return this.#tenant.markHandled(eventId);
-  }
-
-  parseFile(file: { name: string; type: string; size: number; data: string }) {
-    return this.#rpc.parseFile(file);
   }
 
   sendMessage(messages: { to: string; body: string }[]) {
